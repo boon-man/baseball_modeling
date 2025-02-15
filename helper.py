@@ -2,6 +2,7 @@ import pandas as pd
 from datetime import datetime
 import os
 
+
 def calc_fantasy_points_batting(df, column_name):
     """
     Adds a fantasy points column to the DataFrame based on the provided calculation.
@@ -13,9 +14,17 @@ def calc_fantasy_points_batting(df, column_name):
     Returns:
     pd.DataFrame: The DataFrame with the new fantasy points column added.
     """
-    df[column_name] = ((df['1B'] * 3) + (df['2B'] * 6) + (df['3B'] * 8) + (df['HR'] * 10) +
-                       (df['BB'] * 3) + (df['HBP'] * 3) + (df['RBI'] * 2) + (df['R'] * 2) +
-                       (df['SB'] * 4))
+    df[column_name] = (
+        (df["1B"] * 3)
+        + (df["2B"] * 6)
+        + (df["3B"] * 8)
+        + (df["HR"] * 10)
+        + (df["BB"] * 3)
+        + (df["HBP"] * 3)
+        + (df["RBI"] * 2)
+        + (df["R"] * 2)
+        + (df["SB"] * 4)
+    )
     return df
 
 
@@ -30,8 +39,9 @@ def calc_fantasy_points_pitching(df, column_name):
     Returns:
     pd.DataFrame: The DataFrame with the new fantasy points column added.
     """
-    df[column_name] = ((df['W'] * 5) + (df['SO'] * 3) + (df['IP'] * 3) + (df['ER'] * -3))
+    df[column_name] = (df["W"] * 5) + (df["SO"] * 3) + (df["IP"] * 3) + (df["ER"] * -3)
     return df
+
 
 def add_suffix_to_columns(df, suffix, exclude_columns):
     """
@@ -48,6 +58,7 @@ def add_suffix_to_columns(df, suffix, exclude_columns):
     df = df.rename(columns=lambda x: x + suffix if x not in exclude_columns else x)
     return df
 
+
 def save_data(dataframes, file_names):
     """
     Saves multiple DataFrames to the 'data' folder with a year timestamp appended to each file name.
@@ -59,13 +70,16 @@ def save_data(dataframes, file_names):
     Returns:
     None
     """
-    timestamp = datetime.now().strftime('%Y')
-    data_folder = 'data'
+    timestamp = datetime.now().strftime("%Y")
+    data_folder = "data"
     os.makedirs(data_folder, exist_ok=True)
 
     for df, file_name in zip(dataframes, file_names):
-        df.to_csv(os.path.join(data_folder, f'{file_name}_{timestamp}.csv'), index=False)
+        df.to_csv(
+            os.path.join(data_folder, f"{file_name}_{timestamp}.csv"), index=False
+        )
     print(f"Data saved successfully.")
+
 
 def load_training_data():
     """
@@ -74,15 +88,16 @@ def load_training_data():
     Returns:
     tuple: A tuple containing two DataFrames, one for batting data and one for pitching data.
     """
-    current_year = datetime.now().strftime('%Y')
-    data_folder = 'data'
-    batting_data_path = os.path.join(data_folder, f'batting_data_{current_year}.csv')
-    pitching_data_path = os.path.join(data_folder, f'pitching_data_{current_year}.csv')
+    current_year = datetime.now().strftime("%Y")
+    data_folder = "data"
+    batting_data_path = os.path.join(data_folder, f"batting_data_{current_year}.csv")
+    pitching_data_path = os.path.join(data_folder, f"pitching_data_{current_year}.csv")
 
     batting_df = pd.read_csv(batting_data_path)
     pitching_df = pd.read_csv(pitching_data_path)
 
     return batting_df, pitching_df
+
 
 def split_name(df, name_column):
     """
@@ -95,16 +110,17 @@ def split_name(df, name_column):
     Returns:
     pd.DataFrame: The DataFrame with the player names split into first and last name columns.
     """
-    df[['first_name', 'last_name']] = df[name_column].str.split(' ', n = 1, expand=True)
+    df[["first_name", "last_name"]] = df[name_column].str.split(" ", n=1, expand=True)
 
     # Remove anything after an additional space in the last name
-    df['last_name'] = df['last_name'].str.split(' ').str[0]
+    df["last_name"] = df["last_name"].str.split(" ").str[0]
 
-    df['first_name'] = df['first_name'].str.lower()
-    df['last_name'] = df['last_name'].str.lower()
+    df["first_name"] = df["first_name"].str.lower()
+    df["last_name"] = df["last_name"].str.lower()
     return df
 
+
 def get_value_before_comma(value):
-    if ',' in value:
-        return value.split(',')[0]
+    if "," in value:
+        return value.split(",")[0]
     return value
