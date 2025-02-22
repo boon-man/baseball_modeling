@@ -163,7 +163,7 @@ def pull_data(
         # Pulling pitching stats
         pitching_df_future = pitching_stats(
             start_season=end_year_future,  # Selecting a single season for most recent stats
-            qual=20,
+            qual=15,
             split_seasons=True,
         ).filter(items=pitching_stat_cols)
         calc_fantasy_points_pitching(pitching_df_future, "fantasy_points_future")
@@ -173,7 +173,7 @@ def pull_data(
         # Pulling pitching stats
         pitching_df_current = pitching_stats(
             start_season=year,  # Selecting a single season for most recent stats
-            qual=20,
+            qual=15,
             split_seasons=True,
         ).filter(items=pitching_stat_cols)
         calc_fantasy_points_pitching(pitching_df_current, "fantasy_points")
@@ -181,7 +181,7 @@ def pull_data(
         pitching_df_prior = pitching_stats(
             start_season=start_year_prior,
             end_season=end_year_prior,
-            qual=20,
+            qual=15,
             split_seasons=False,
         ).filter(items=pitching_stat_cols)
         pitching_df_prior = pitching_df_prior.drop(
@@ -286,7 +286,7 @@ def pull_prediction_data(
     # Pulling pitching stats
     pitching_df_current = pitching_stats(
         start_season=prediction_year,  # Selecting a single season for most recent stats
-        qual=20,
+        qual=15,
         split_seasons=True,
     ).filter(items=pitching_stat_cols)
     calc_fantasy_points_pitching(pitching_df_current, "fantasy_points")
@@ -294,7 +294,7 @@ def pull_prediction_data(
     pitching_df_prior = pitching_stats(
         start_season=start_year_prior,
         end_season=end_year_prior,
-        qual=20,
+        qual=15,
         split_seasons=False,
     ).filter(items=pitching_stat_cols)
     pitching_df_prior = pitching_df_prior.drop(

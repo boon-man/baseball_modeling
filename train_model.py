@@ -3,7 +3,7 @@ import numpy as np
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
 from xgboost import XGBRegressor
-from sklearn.metrics import mean_squared_error, r2_score
+from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_error
 from xgboost import XGBRegressor
 from hyperopt import fmin, tpe, Trials, STATUS_OK
 
@@ -67,6 +67,10 @@ def create_baseline(
     rmse = np.sqrt(mean_squared_error(y_test, y_pred))
     print(f"Root Mean Squared Error: {rmse}")
 
+    # Calculate the mean absolute error
+    mae = mean_absolute_error(y_test, y_pred)
+    print(f"Mean Absolute Error: {mae}")
+
     # Calculate the R^2 score
     r2 = r2_score(y_test, y_pred)
     print(f"R^2 Score: {r2}")
@@ -82,7 +86,16 @@ def tune_model(
     space: dict,
     n_estimators_list: list,
     max_depth_list: list,
+    metric: str,
+    alpha: float = 1.5,  # Under-predictions penalty multiplier,
+    evals: int = 30,
 ):
+
+    # Define an asymmetric loss function
+    def asymmetric_loss(y_true, y_pred, alpha=1.5):
+        residuals = y_true - y_pred
+        loss = np.where(residuals > 0, alpha * (residuals**2), residuals**2)
+        return np.mean(loss)
 
     # Define the objective function for Hyperopt
     def objective(params):
@@ -102,11 +115,20 @@ def tune_model(
         # Predict on validation set
         y_pred = model.predict(x_test)
 
-        # Calculate RMSE
-        rmse = np.sqrt(mean_squared_error(y_test, y_pred))
-
-        # Return negative RMSE as Hyperopt minimizes the objective
-        return {"loss": rmse, "status": STATUS_OK}
+        if metric == "rmse":
+            # Calculate RMSE
+            loss = np.sqrt(mean_squared_error(y_test, y_pred))
+            # Return negative RMSE as Hyperopt minimizes the objective
+            return {"loss": loss, "status": STATUS_OK}
+        if metric == "mae":
+            # Calculate MAE
+            loss = mean_absolute_error(y_test, y_pred)
+            # Return negative MAE as Hyperopt minimizes the objective
+            return {"loss": loss, "status": STATUS_OK}
+        if metric == "asymmetric":
+            # Use asymmetric loss function
+            loss = asymmetric_loss(y_test, y_pred, alpha=alpha)
+            return {"loss": loss, "status": STATUS_OK}
 
     # Create a Trials object to store results
     trials = Trials()
@@ -116,9 +138,9 @@ def tune_model(
         fn=objective,  # Objective function
         space=space,  # Search space
         algo=tpe.suggest,  # Tree of Parzen Estimators (TPE) algorithm
-        max_evals=20,  # Number of iterations
-        trials=trials,  # Store trials for analysis
-        rstate=np.random.default_rng(1234),  # For reproducibility
+        max_evals=evals,  # Number of iterations
+        trials=trials,  # Store trials for analysis, no fixed rstate to make testing dynamic
+        #        rstate=np.random.default_rng(1234),  # For reproducibility
     )
 
     # Map the final parameters
@@ -157,6 +179,10 @@ def create_model(
     # Calculate the root mean squared error
     rmse = np.sqrt(mean_squared_error(y_test, y_pred))
     print(f"Root Mean Squared Error: {rmse}")
+
+    # Calculate the mean absolute error
+    mae = mean_absolute_error(y_test, y_pred)
+    print(f"Mean Absolute Error: {mae}")
 
     # Calculate the R^2 score
     r2 = r2_score(y_test, y_pred)
