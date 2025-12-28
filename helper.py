@@ -59,24 +59,26 @@ def add_suffix_to_columns(df, suffix, exclude_columns):
     return df
 
 
-def save_data(dataframes, file_names):
+def save_data(dataframes, file_names, start_year, end_year):
     """
-    Saves multiple DataFrames to the 'data' folder with a year timestamp appended to each file name.
+    Saves multiple DataFrames to the 'data' folder with start and end year appended to each file name.
 
     Parameters:
     dataframes (list of pd.DataFrame): List of DataFrames to be saved.
     file_names (list of str): List of file names corresponding to each DataFrame.
+    start_year (int): Starting year for the data.
+    end_year (int): Ending year for the data.
 
     Returns:
     None
     """
-    timestamp = datetime.now().strftime("%Y")
     data_folder = "data"
     os.makedirs(data_folder, exist_ok=True)
 
     for df, file_name in zip(dataframes, file_names):
         df.to_csv(
-            os.path.join(data_folder, f"{file_name}_{timestamp}.csv"), index=False
+            os.path.join(data_folder, f"{file_name}_{start_year}_{end_year}.csv"),
+            index=False,
         )
     print(f"Data saved successfully.")
 
