@@ -8,6 +8,25 @@ from hyperopt import fmin, tpe, Trials, STATUS_OK
 
 
 def scale_numeric_columns(dfs: list, target_variable: str) -> list:
+    """
+    Scales numeric columns in a list of DataFrames using standardization.
+
+    This function applies sklearn's StandardScaler to all numeric columns in each DataFrame,
+    except for the player ID column ("IDfg") and the specified target variable. The scaling
+    is performed independently for each DataFrame.
+
+    Parameters
+    ----------
+    dfs : list of pd.DataFrame
+        List of DataFrames to scale.
+    target_variable : str
+        Name of the target variable column to exclude from scaling.
+
+    Returns
+    -------
+    list of pd.DataFrame
+        List of DataFrames with scaled numeric columns.
+    """
     scaler = StandardScaler()
     scaled_dfs = []
     for df in dfs:
@@ -22,7 +41,37 @@ def scale_numeric_columns(dfs: list, target_variable: str) -> list:
 
 def split_data(df: pd.DataFrame, test_size=0.2, val_size=0.1, random_state=62820):
     """
-    Splits the data into train, validation, and test sets.
+    Splits a DataFrame into training, validation, and test sets.
+
+    The function separates predictors and target, then performs a two-step split:
+    first into train+val and test, then splits train+val into train and validation sets.
+    The split is stratified by the specified random seed for reproducibility.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        The input DataFrame containing features and the target variable.
+    test_size : float, default 0.2
+        Proportion of the data to allocate to the test set.
+    val_size : float, default 0.1
+        Proportion of the data to allocate to the validation set (relative to the full dataset).
+    random_state : int, default 62820
+        Random seed for reproducibility.
+
+    Returns
+    -------
+    x_train : pd.DataFrame
+        Training predictors.
+    x_val : pd.DataFrame
+        Validation predictors.
+    x_test : pd.DataFrame
+        Test predictors.
+    y_train : pd.Series
+        Training target.
+    y_val : pd.Series
+        Validation target.
+    y_test : pd.Series
+        Test target.
     """
     x = df.drop(columns=["Name", "fantasy_points_future"])
     y = df["fantasy_points_future"]
@@ -47,9 +96,35 @@ def create_baseline(
     y_train: pd.DataFrame,
     y_val: pd.DataFrame,
     y_test: pd.DataFrame,
-):
+) -> tuple[XGBRegressor, np.ndarray]:
     """
-    This function creates a baseline model for the data
+    Trains a baseline XGBoost regression model and evaluates its performance.
+
+    This function fits a baseline XGBoost regressor on the training data, then evaluates
+    the model on the test set using RMSE, MAE, and R^2 metrics. The function returns the
+    trained model and the test set predictions.
+
+    Parameters
+    ----------
+    x_train : pd.DataFrame
+        Training predictors.
+    x_val : pd.DataFrame
+        Validation predictors (not used in this baseline).
+    x_test : pd.DataFrame
+        Test predictors.
+    y_train : pd.Series
+        Training target.
+    y_val : pd.Series
+        Validation target (not used in this baseline).
+    y_test : pd.Series
+        Test target.
+
+    Returns
+    -------
+    model : XGBRegressor
+        Trained XGBoost regression model.
+    y_test_pred : np.ndarray
+        Predictions for the test set.
     """
 
     # Initialize the baseline XGBoost Regressor
@@ -64,15 +139,6 @@ def create_baseline(
 
     # Fit the model, drop ID column from datasets prior to fitting
     model.fit(x_train, y_train)
-
-    # # --- Validation set evaluation ---
-    # y_val_pred = model.predict(x_val)
-    # val_rmse = np.sqrt(mean_squared_error(y_val, y_val_pred))
-    # val_mae = mean_absolute_error(y_val, y_val_pred)
-    # val_r2 = r2_score(y_val, y_val_pred)
-    # print(
-    #     f"[Test] RMSE: {test_rmse:.3f} | MAE: {test_mae:.3f} | R^2: {test_r2:.3f}"
-    # )
 
     # --- Test set evaluation ---
     y_test_pred = model.predict(x_test)
@@ -96,7 +162,46 @@ def tune_xgb(
     random_state: int = 62820,
     id_cols: list[str] | None = None,
     max_depth_choices: list[int] | None = None,
-):
+) -> dict:
+    """
+    Performs hyperparameter optimization for an XGBoost regressor using Hyperopt.
+
+    This function tunes XGBoost model hyperparameters by minimizing a specified loss metric
+    (RMSE, MAE, or an asymmetric loss) on the validation set. The search is performed using
+    the Hyperopt library and the Tree of Parzen Estimators (TPE) algorithm. The function
+    returns the best set of hyperparameters found.
+
+    Parameters
+    ----------
+    X_train : pd.DataFrame
+        Training predictors.
+    X_val : pd.DataFrame
+        Validation predictors.
+    y_train : pd.Series
+        Training target.
+    y_val : pd.Series
+        Validation target.
+    space : dict
+        Hyperparameter search space for Hyperopt.
+    metric : str, default "asymmetric"
+        Metric to optimize ("rmse", "mae", or "asymmetric").
+    alpha : float, default 1.5
+        Penalty multiplier for under-predictions in the asymmetric loss.
+    evals : int, default 75
+        Number of Hyperopt evaluations.
+    random_state : int, default 62820
+        Random seed for reproducibility.
+    id_cols : list of str, optional
+        Columns to exclude from predictors (e.g., player IDs).
+    max_depth_choices : list of int, optional
+        List of possible max_depth values (for mapping Hyperopt choices).
+
+    Returns
+    -------
+    best_params : dict
+        Dictionary of the best hyperparameters found.
+    """
+
     id_cols = id_cols or ["IDfg"]
 
     def _drop_ids(df: pd.DataFrame) -> pd.DataFrame:
@@ -192,85 +297,6 @@ def tune_xgb(
     return best_params
 
 
-# def tune_model(
-#     x_train: pd.DataFrame,
-#     x_test: pd.DataFrame,
-#     y_train: pd.DataFrame,
-#     y_test: pd.DataFrame,
-#     space: dict,
-#     n_estimators_list: list,
-#     max_depth_list: list,
-#     metric: str,
-#     alpha: float = 1.5,  # Under-predictions penalty multiplier,
-#     evals: int = 30,
-# ):
-
-#     # Define an asymmetric loss function
-#     def asymmetric_loss(y_true, y_pred, alpha=1.5):
-#         residuals = y_true - y_pred
-#         loss = np.where(residuals > 0, alpha * (residuals**2), residuals**2)
-#         return np.mean(loss)
-
-#     # Define the objective function for Hyperopt
-#     def objective(params):
-#         # Initialize the model with current parameters
-#         model = XGBRegressor(
-#             n_estimators=params["n_estimators"],
-#             learning_rate=params["learning_rate"],
-#             max_depth=params["max_depth"],
-#             subsample=params["subsample"],
-#             colsample_bytree=params["colsample_bytree"],
-#             random_state=1234,
-#         )
-
-#         # Fit the model
-#         model.fit(x_train, y_train)
-
-#         # Predict on validation set
-#         y_pred = model.predict(x_test)
-
-#         if metric == "rmse":
-#             # Calculate RMSE
-#             loss = np.sqrt(mean_squared_error(y_test, y_pred))
-#             # Return negative RMSE as Hyperopt minimizes the objective
-#             return {"loss": loss, "status": STATUS_OK}
-#         if metric == "mae":
-#             # Calculate MAE
-#             loss = mean_absolute_error(y_test, y_pred)
-#             # Return negative MAE as Hyperopt minimizes the objective
-#             return {"loss": loss, "status": STATUS_OK}
-#         if metric == "asymmetric":
-#             # Use asymmetric loss function
-#             loss = asymmetric_loss(y_test, y_pred, alpha=alpha)
-#             return {"loss": loss, "status": STATUS_OK}
-
-#     # Create a Trials object to store results
-#     trials = Trials()
-
-#     # Run optimization
-#     best_params = fmin(
-#         fn=objective,  # Objective function
-#         space=space,  # Search space
-#         algo=tpe.suggest,  # Tree of Parzen Estimators (TPE) algorithm
-#         max_evals=evals,  # Number of iterations
-#         trials=trials,  # Store trials for analysis, no fixed rstate to make testing dynamic
-#         #        rstate=np.random.default_rng(1234),  # For reproducibility
-#     )
-
-#     # Map the final parameters
-#     final_params = {
-#         "n_estimators": n_estimators_list[best_params["n_estimators"]],
-#         "learning_rate": best_params["learning_rate"],
-#         "max_depth": max_depth_list[best_params["max_depth"]],
-#         "subsample": best_params["subsample"],
-#         "colsample_bytree": best_params["colsample_bytree"],
-#     }
-
-#     print("Best Parameters:", final_params)
-
-#     return final_params
-
-
 def create_model(
     X_train: pd.DataFrame,
     X_val: pd.DataFrame,
@@ -281,8 +307,46 @@ def create_model(
     final_params: dict,
     random_state: int = 62820,
     id_cols: list[str] | None = None,
-    alpha: float = 1.5,  # <-- same asymmetry parameter
-):
+    alpha: float = 1.5,
+) -> tuple[XGBRegressor, np.ndarray]:
+    """
+    Trains an XGBoost regression model with hyperparameter tuning and evaluates its performance.
+
+    This function fits an XGBoost regressor using the provided training data and hyperparameters,
+    evaluates the model on both validation and test sets using RMSE, MAE, R^2, and asymmetric loss metrics,
+    and prints the results. The function returns the trained model and test set predictions.
+
+    Parameters
+    ----------
+    X_train : pd.DataFrame
+        Training predictors.
+    X_val : pd.DataFrame
+        Validation predictors.
+    X_test : pd.DataFrame
+        Test predictors.
+    y_train : pd.Series
+        Training target.
+    y_val : pd.Series
+        Validation target.
+    y_test : pd.Series
+        Test target.
+    final_params : dict
+        Dictionary of hyperparameters for the XGBoost regressor.
+    random_state : int, default 62820
+        Random seed for reproducibility.
+    id_cols : list of str, optional
+        Columns to exclude from predictors (e.g., player IDs).
+    alpha : float, default 1.5
+        Penalty multiplier for under-predictions in the asymmetric loss.
+
+    Returns
+    -------
+    model : XGBRegressor
+        Trained XGBoost regression model.
+    test_pred : np.ndarray
+        Predictions for the test set.
+    """
+
     id_cols = id_cols or ["IDfg"]
 
     def _drop_ids(df: pd.DataFrame) -> pd.DataFrame:
@@ -336,37 +400,3 @@ def create_model(
     )
 
     return model, test_pred
-
-
-# def create_model(
-#     x_train: pd.DataFrame,
-#     x_test: pd.DataFrame,
-#     y_train: pd.DataFrame,
-#     y_test: pd.DataFrame,
-#     final_params: dict,
-# ):
-#     """
-#     This function creates a model using the best training parameters
-#     """
-#     # Initialize the XGBoost Regressor with best parameters
-#     model = XGBRegressor(**final_params, random_state=1234)
-
-#     # Fit the model
-#     model.fit(x_train, y_train)
-
-#     # Make predictions
-#     y_pred = model.predict(x_test)
-
-#     # Calculate the root mean squared error
-#     rmse = np.sqrt(mean_squared_error(y_test, y_pred))
-#     print(f"Root Mean Squared Error: {rmse}")
-
-#     # Calculate the mean absolute error
-#     mae = mean_absolute_error(y_test, y_pred)
-#     print(f"Mean Absolute Error: {mae}")
-
-#     # Calculate the R^2 score
-#     r2 = r2_score(y_test, y_pred)
-#     print(f"R^2 Score: {r2}")
-
-#     return model, y_pred
