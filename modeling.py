@@ -5,6 +5,7 @@ from sklearn.preprocessing import StandardScaler
 from xgboost import XGBRegressor
 from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_error
 from hyperopt import fmin, tpe, Trials, STATUS_OK
+from IPython.display import display
 
 
 def scale_numeric_columns(dfs: list, target_variable: str) -> list:
@@ -400,3 +401,102 @@ def create_model(
     )
 
     return model, test_pred
+
+def compile_predictions(
+    complete_df: pd.DataFrame,
+    test_df: pd.DataFrame,
+    y_test: pd.Series,
+    y_pred,
+    *,
+    id_col: str = "IDfg",
+    name_col: str = "Name",
+    season_col: str = "Season",
+    actual_col: str = "fantasy_points_future",
+) -> pd.DataFrame:
+    """
+    Compile a results dataframe that aligns with the NBA plotting conventions.
+
+    Output columns (core):
+      - Name
+      - Season
+      - predicted_fantasy_points
+      - fantasy_points_future
+      - prediction_diff (predicted - actual)
+      - absolute_diff (abs(predicted - actual))
+
+    This output plugs directly into:
+      - plot_actual_vs_pred_mlb(..., pred_col="predicted_fantasy_points")
+      - plot_resid_vs_pred_mlb(..., pred_col="predicted_fantasy_points")
+      - plot_resid_hist_mlb(...)
+    """
+
+    # Copy so we don't mutate caller dataframes
+    test_df_out = test_df.copy()
+
+    # Attach predictions + actuals (aligned naming)
+    test_df_out["predicted_fantasy_points"] = y_pred
+    test_df_out[actual_col] = y_test
+
+    # Pull minimal metadata from the full dataset for Name/Season join
+    meta_df = complete_df[[id_col, name_col, season_col]].drop_duplicates(
+        subset=[id_col, season_col]
+    )
+
+    # Merge metadata onto test rows
+    results = test_df_out.merge(meta_df, on=[id_col, season_col], how="left")
+
+    # Compute diffs
+    results["prediction_diff"] = (
+        results["predicted_fantasy_points"] - results[actual_col]
+    )
+    results["absolute_diff"] = results["prediction_diff"].abs()
+
+    # Select output columns (only keep what exists)
+    desired_cols = [
+        name_col,
+        actual_col,
+        "predicted_fantasy_points",
+        "prediction_diff",
+        "absolute_diff",
+        season_col,
+        "Age",
+        "fantasy_points",
+    ]
+    desired_cols = [c for c in desired_cols if c in results.columns]
+
+    results = results[desired_cols].sort_values(
+        by="predicted_fantasy_points", ascending=False
+    )
+
+    return results
+
+def combine_projections(
+    prediction_df: pd.DataFrame, projection_df: pd.DataFrame
+) -> pd.DataFrame:
+    """
+    Combines the model predictions with the FantasyPros projections.
+
+    Parameters:
+    prediction_df (pd.DataFrame): The DataFrame containing the model predictions.
+    projection_df (pd.DataFrame): The DataFrame containing the FantasyPros projections.
+
+    Returns:
+    pd.DataFrame: The combined DataFrame.
+    """
+    # Merge the model predictions with the FantasyPros projections
+    combined = prediction_df.merge(
+        projection_df, on=["first_name", "last_name"], how="outer"
+    )
+
+    # Filter to rows where IDfg contains duplicate values (excluding NaN)
+    duplicates = combined[
+        combined["IDfg"].notna() & combined.duplicated("IDfg", keep=False)
+    ]
+
+    if not duplicates.empty:
+        print("Duplicate rows found:")
+        display(duplicates)
+    else:
+        print("No duplicate rows found.")
+
+    return combined
