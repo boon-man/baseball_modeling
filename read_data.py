@@ -76,8 +76,7 @@ def pull_projections(url: str):
 
     return df
 
-
-def player_data(df: pd.DataFrame) -> pd.DataFrame:
+def _player_history_lookup(df: pd.DataFrame) -> pd.DataFrame:
     """
     Pulls player data from the pybaseball API and merges it with the provided DataFrame to obtain player rookie seasons.
 
@@ -102,7 +101,7 @@ def player_data(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def validate_covid_impact(season, years):
+def _validate_covid_impact(season, years):
     """
     This function checks if the year 2020 occurred during the specified number of years leading up to the given season.
     """
@@ -123,6 +122,9 @@ def _career_year_bounds(end_year: int, career_years_back: int) -> tuple[int, int
     start_y = end_year - career_years_back + 1
     return start_y, end_year
 
+# Helper data pull function for identifying year suffixes for saved filename recognition
+def _year_suffix(start_year: int, end_year: int) -> str:
+    return f"{start_year}" if start_year == end_year else f"{start_year}_{end_year}"
 
 def pull_agg_stats(
     *,
@@ -227,7 +229,8 @@ def pull_data(
     pitching_stat_cols: list,
     batting_career_cols: list,
     pitching_career_cols: list,
-    save_results: bool,
+    include_future_target: bool,
+    dataset_tag: str,
     career_window_years: int = 10,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """
@@ -254,8 +257,10 @@ def pull_data(
         List of columns to include for batting career aggregates.
     pitching_career_cols : list of str
         List of columns to include for pitching career aggregates.
-    save_results : bool
-        Whether to save the processed DataFrames to disk.
+    include_future_target : bool
+        Whether to include future season fantasy points as target variable.
+    dataset_tag : str
+        Tag to append to saved dataset filenames (e.g., "train" or "pred").
     career_window_years : int, default 10
         Number of years to use for career aggregates.
 
@@ -265,8 +270,11 @@ def pull_data(
         Tuple containing (batting_df, pitching_df) with all features and targets for modeling.
     """
 
-    batting_path = f"data/batting_data_{start_year}_{end_year}.csv"
-    pitching_path = f"data/pitching_data_{start_year}_{end_year}.csv"
+    year_suffix = _year_suffix(start_year, end_year)
+    tag = f"_{dataset_tag}" if dataset_tag else ""
+
+    batting_path = f"data/batting_{tag}_{year_suffix}.csv"
+    pitching_path = f"data/pitching_{tag}_{year_suffix}.csv"
 
     if os.path.exists(batting_path) and os.path.exists(pitching_path):
         batting_df = pd.read_csv(batting_path)
@@ -283,6 +291,7 @@ def pull_data(
     batting_all = []
     pitching_all = []
 
+    # Loop through each input year and pull data
     for year in years:
         print(f"Pulling data for year: {year}")
 
@@ -298,14 +307,20 @@ def pull_data(
         ).filter(items=batting_stat_cols)
         calc_fantasy_points_batting(batting_current, "fantasy_points")
 
-        # Future season (target)
-        batting_future = batting_stats(
-            start_season=year + 1,
-            qual=50,
-            split_seasons=True,
-        ).filter(items=batting_stat_cols)
-        calc_fantasy_points_batting(batting_future, "fantasy_points_future")
-        batting_future = batting_future[["IDfg", "fantasy_points_future"]]
+        if include_future_target and year + 1 > end_year:
+            raise ValueError(
+                f"Future target requested for year={year}, but year+1 exceeds end_year."
+            )
+
+        if include_future_target:
+            # Future season (target)
+            batting_future = batting_stats(
+                start_season=year + 1,
+                qual=50,
+                split_seasons=True,
+            ).filter(items=batting_stat_cols)
+            calc_fantasy_points_batting(batting_future, "fantasy_points_future")
+            batting_future = batting_future[["IDfg", "fantasy_points_future"]]
 
         # Prior k
         bat_prior_k = pull_agg_stats(
@@ -350,9 +365,15 @@ def pull_data(
 
         # Combine batting
         batting_year = (
-            batting_current.merge(batting_priors, on="IDfg", how="left")
-            .merge(batting_future, on="IDfg", how="left")
-            .merge(career_batting, on="IDfg", how="left")
+            batting_current
+                .merge(batting_priors, on="IDfg", how="left")
+                .merge(career_batting, on="IDfg", how="left")
+        )
+
+        # Append future target if pulling training data
+        if include_future_target:
+            batting_year = batting_year.merge(
+                batting_future, on="IDfg", how="left"
         )
 
         # =========================
@@ -366,13 +387,20 @@ def pull_data(
         ).filter(items=pitching_stat_cols)
         calc_fantasy_points_pitching(pitching_current, "fantasy_points")
 
-        pitching_future = pitching_stats(
-            start_season=year + 1,
-            qual=15,
-            split_seasons=True,
-        ).filter(items=pitching_stat_cols)
-        calc_fantasy_points_pitching(pitching_future, "fantasy_points_future")
-        pitching_future = pitching_future[["IDfg", "fantasy_points_future"]]
+        if include_future_target and year + 1 > end_year:
+            raise ValueError(
+                f"Future target requested for year={year}, but year+1 exceeds end_year."
+            )
+
+        if include_future_target:
+            pitching_future = pitching_stats(
+                start_season=year + 1,
+                qual=15,
+                split_seasons=True,
+            ).filter(items=pitching_stat_cols)
+
+            calc_fantasy_points_pitching(pitching_future, "fantasy_points_future")
+            pitching_future = pitching_future[["IDfg", "fantasy_points_future"]]
 
         pit_prior_k = pull_agg_stats(
             stats_fn=pitching_stats,
@@ -413,10 +441,17 @@ def pull_data(
             fantasy_col="fantasy_points_career",
         )
 
+        # Combine pitching
         pitching_year = (
-            pitching_current.merge(pitching_priors, on="IDfg", how="left")
-            .merge(pitching_future, on="IDfg", how="left")
-            .merge(career_pitching, on="IDfg", how="left")
+            pitching_current
+                .merge(pitching_priors, on="IDfg", how="left")
+                .merge(career_pitching, on="IDfg", how="left")
+        )
+
+        # Append future target if pulling training data
+        if include_future_target:
+            pitching_year = pitching_year.merge(
+                pitching_future, on="IDfg", how="left"
         )
 
         batting_all.append(batting_year)
@@ -432,142 +467,197 @@ def pull_data(
     pitching_df["covid_season"] = pitching_df["Season"] == 2020
 
     batting_df[f"covid_impact_prior{agg_years}"] = batting_df["Season"].apply(
-        lambda x: validate_covid_impact(x, agg_years)
+        lambda x: _validate_covid_impact(x, agg_years)
     )
     pitching_df[f"covid_impact_prior{agg_years}"] = pitching_df["Season"].apply(
-        lambda x: validate_covid_impact(x, agg_years)
+        lambda x: _validate_covid_impact(x, agg_years)
     )
 
     batting_df[f"covid_impact_prior{agg_years * 2}"] = batting_df["Season"].apply(
-        lambda x: validate_covid_impact(x, agg_years * 2)
+        lambda x: _validate_covid_impact(x, agg_years * 2)
     )
     pitching_df[f"covid_impact_prior{agg_years * 2}"] = pitching_df["Season"].apply(
-        lambda x: validate_covid_impact(x, agg_years * 2)
+        lambda x: _validate_covid_impact(x, agg_years * 2)
     )
 
     # -------------------------
     # Player metadata + cleanup
     # -------------------------
-    batting_df = player_data(batting_df)
-    pitching_df = player_data(pitching_df)
+    batting_df = _player_history_lookup(batting_df)
+    pitching_df = _player_history_lookup(pitching_df)
 
     batting_df = batting_df.fillna(0)
     pitching_df = pitching_df.fillna(0)
 
-    if save_results:
-        save_data(
+    save_data(
             dataframes=[batting_df, pitching_df],
-            file_names=["batting_data", "pitching_data"],
+            file_names=["batting", "pitching"],
             start_year=start_year,
             end_year=end_year,
-        )
+            dataset_tag=dataset_tag,
+    )
 
     print("Data pull complete.")
     return batting_df, pitching_df
 
 
-def pull_prediction_data(
-    prediction_year: int,
+# -------------------------
+# Wrappers for pulling training & testing data
+# -------------------------
+def pull_training_data(
+    start_year: int,
+    end_year: int,  # last feature year (e.g., 2024)
     agg_years: int,
     batting_stat_cols: list,
     pitching_stat_cols: list,
-) -> tuple:
+    batting_career_cols: list,
+    pitching_career_cols: list,
+    career_window_years: int = 10,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
     """
-    Pulls and processes batting and pitching data for the specified years.
-
-    Parameters:
-    end_year (int): The end year for the data pull.
-    agg_years (int): The number of years to aggregate for prior data.
-    batting_stat_cols (list): List of columns to include in the batting data.
-    pitching_stat_cols (list): List of columns to include in the pitching data.
-
-    Returns:
-    tuple: A tuple containing two DataFrames, one for batting data and one for pitching data.
+    Pull training data with future-season targets included.
     """
-    # Initialize empty DataFrames
-    batting_df = pd.DataFrame()
-    pitching_df = pd.DataFrame()
-
-    # Creating start and end years for the aggregated data pull of prior player seasons
-    end_year_prior = prediction_year - 1
-    start_year_prior = end_year_prior - agg_years
-
-    # Pulling batting stats
-    batting_df_current = batting_stats(
-        start_season=prediction_year,  # Selecting a single season for most recent stats
-        qual=50,
-        split_seasons=True,
-    ).filter(items=batting_stat_cols)
-    calc_fantasy_points_batting(batting_df_current, "fantasy_points")
-
-    batting_df_prior = batting_stats(
-        start_season=start_year_prior,
-        end_season=end_year_prior,
-        qual=50,
-        split_seasons=False,
-    ).filter(items=batting_stat_cols)
-    batting_df_prior = batting_df_prior.drop(
-        columns=["Name", "Age"]
-    )  # Dropping redundant columns for joining
-    calc_fantasy_points_batting(batting_df_prior, "fantasy_points_prior")
-    batting_df_prior = add_suffix_to_columns(
-        batting_df_prior, "_prior", exclude_columns=["IDfg", "fantasy_points_prior"]
+    return pull_data(
+        start_year=start_year,
+        end_year=end_year,
+        agg_years=agg_years,
+        batting_stat_cols=batting_stat_cols,
+        pitching_stat_cols=pitching_stat_cols,
+        batting_career_cols=batting_career_cols,
+        pitching_career_cols=pitching_career_cols,
+        career_window_years=career_window_years,
+        include_future_target=True, # Include future target for training data
+        dataset_tag="train",
     )
 
-    # Combining batting features into single dataframe and replace NaN values with 0
-    batting_df_current = batting_df_current.merge(
-        batting_df_prior, on="IDfg", how="left"
+
+def pull_prediction_data(
+    year: int,
+    agg_years: int,
+    batting_stat_cols: list,
+    pitching_stat_cols: list,
+    batting_career_cols: list,
+    pitching_career_cols: list,
+    career_window_years: int = 10,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Pull a scoring/prediction dataset (features only; no future target pull).
+    """
+    return pull_data(
+        start_year=year,
+        end_year=year,
+        agg_years=agg_years,
+        batting_stat_cols=batting_stat_cols,
+        pitching_stat_cols=pitching_stat_cols,
+        batting_career_cols=batting_career_cols,
+        pitching_career_cols=pitching_career_cols,
+        career_window_years=career_window_years,
+        include_future_target=False, # No future target for prediction data
+        dataset_tag="pred",
     )
 
-    # Pulling pitching stats
-    pitching_df_current = pitching_stats(
-        start_season=prediction_year,  # Selecting a single season for most recent stats
-        qual=15,
-        split_seasons=True,
-    ).filter(items=pitching_stat_cols)
-    calc_fantasy_points_pitching(pitching_df_current, "fantasy_points")
+# def pull_prediction_data(
+#     prediction_year: int,
+#     agg_years: int,
+#     batting_stat_cols: list,
+#     pitching_stat_cols: list,
+# ) -> tuple:
+#     """
+#     Pulls and processes batting and pitching data for the specified years.
 
-    pitching_df_prior = pitching_stats(
-        start_season=start_year_prior,
-        end_season=end_year_prior,
-        qual=15,
-        split_seasons=False,
-    ).filter(items=pitching_stat_cols)
-    pitching_df_prior = pitching_df_prior.drop(
-        columns=["Name", "Age"]
-    )  # Dropping redundant columns for joining
-    calc_fantasy_points_pitching(pitching_df_prior, "fantasy_points_prior")
-    pitching_df_prior = add_suffix_to_columns(
-        pitching_df_prior, "_prior", exclude_columns=["IDfg", "fantasy_points_prior"]
-    )
+#     Parameters:
+#     end_year (int): The end year for the data pull.
+#     agg_years (int): The number of years to aggregate for prior data.
+#     batting_stat_cols (list): List of columns to include in the batting data.
+#     pitching_stat_cols (list): List of columns to include in the pitching data.
 
-    # Combining pitching features into single dataframe & replace NaN values with 0
-    pitching_df_current = pitching_df_current.merge(
-        pitching_df_prior, on="IDfg", how="left"
-    )
+#     Returns:
+#     tuple: A tuple containing two DataFrames, one for batting data and one for pitching data.
+#     """
+#     # Initialize empty DataFrames
+#     batting_df = pd.DataFrame()
+#     pitching_df = pd.DataFrame()
 
-    # Append the results to the main DataFrames
-    batting_df = pd.concat([batting_df, batting_df_current], ignore_index=True)
-    pitching_df = pd.concat([pitching_df, pitching_df_current], ignore_index=True)
+#     # Creating start and end years for the aggregated data pull of prior player seasons
+#     end_year_prior = prediction_year - 1
+#     start_year_prior = end_year_prior - agg_years
 
-    # Add a column to indicate if the season is during the COVID-19 pandemic
-    batting_df["covid_season"] = batting_df["Season"] == 2020
-    pitching_df["covid_season"] = pitching_df["Season"] == 2020
+#     # Pulling batting stats
+#     batting_df_current = batting_stats(
+#         start_season=prediction_year,  # Selecting a single season for most recent stats
+#         qual=50,
+#         split_seasons=True,
+#     ).filter(items=batting_stat_cols)
+#     calc_fantasy_points_batting(batting_df_current, "fantasy_points")
 
-    # Add a column to indicate if the prior seasons were during the COVID-19 pandemic
-    batting_df["covid_impact"] = batting_df["Season"].apply(
-        lambda x: validate_covid_impact(x, agg_years)
-    )
-    pitching_df["covid_impact"] = pitching_df["Season"].apply(
-        lambda x: validate_covid_impact(x, agg_years)
-    )
+#     batting_df_prior = batting_stats(
+#         start_season=start_year_prior,
+#         end_season=end_year_prior,
+#         qual=50,
+#         split_seasons=False,
+#     ).filter(items=batting_stat_cols)
+#     batting_df_prior = batting_df_prior.drop(
+#         columns=["Name", "Age"]
+#     )  # Dropping redundant columns for joining
+#     calc_fantasy_points_batting(batting_df_prior, "fantasy_points_prior")
+#     batting_df_prior = add_suffix_to_columns(
+#         batting_df_prior, "_prior", exclude_columns=["IDfg", "fantasy_points_prior"]
+#     )
 
-    # Add player rookie seasons onto the data, helps with modeling new players vs veterans
-    batting_df = player_data(batting_df)
-    pitching_df = player_data(pitching_df)
+#     # Combining batting features into single dataframe and replace NaN values with 0
+#     batting_df_current = batting_df_current.merge(
+#         batting_df_prior, on="IDfg", how="left"
+#     )
 
-    # Replacing NaN values with 0
-    batting_df.fillna(0, inplace=True)
-    pitching_df.fillna(0, inplace=True)
+#     # Pulling pitching stats
+#     pitching_df_current = pitching_stats(
+#         start_season=prediction_year,  # Selecting a single season for most recent stats
+#         qual=15,
+#         split_seasons=True,
+#     ).filter(items=pitching_stat_cols)
+#     calc_fantasy_points_pitching(pitching_df_current, "fantasy_points")
 
-    return batting_df, pitching_df
+#     pitching_df_prior = pitching_stats(
+#         start_season=start_year_prior,
+#         end_season=end_year_prior,
+#         qual=15,
+#         split_seasons=False,
+#     ).filter(items=pitching_stat_cols)
+#     pitching_df_prior = pitching_df_prior.drop(
+#         columns=["Name", "Age"]
+#     )  # Dropping redundant columns for joining
+#     calc_fantasy_points_pitching(pitching_df_prior, "fantasy_points_prior")
+#     pitching_df_prior = add_suffix_to_columns(
+#         pitching_df_prior, "_prior", exclude_columns=["IDfg", "fantasy_points_prior"]
+#     )
+
+#     # Combining pitching features into single dataframe & replace NaN values with 0
+#     pitching_df_current = pitching_df_current.merge(
+#         pitching_df_prior, on="IDfg", how="left"
+#     )
+
+#     # Append the results to the main DataFrames
+#     batting_df = pd.concat([batting_df, batting_df_current], ignore_index=True)
+#     pitching_df = pd.concat([pitching_df, pitching_df_current], ignore_index=True)
+
+#     # Add a column to indicate if the season is during the COVID-19 pandemic
+#     batting_df["covid_season"] = batting_df["Season"] == 2020
+#     pitching_df["covid_season"] = pitching_df["Season"] == 2020
+
+#     # Add a column to indicate if the prior seasons were during the COVID-19 pandemic
+#     batting_df["covid_impact"] = batting_df["Season"].apply(
+#         lambda x: _validate_covid_impact(x, agg_years)
+#     )
+#     pitching_df["covid_impact"] = pitching_df["Season"].apply(
+#         lambda x: _validate_covid_impact(x, agg_years)
+#     )
+
+#     # Add player rookie seasons onto the data, helps with modeling new players vs veterans
+#     batting_df = player_data(batting_df)
+#     pitching_df = player_data(pitching_df)
+
+#     # Replacing NaN values with 0
+#     batting_df.fillna(0, inplace=True)
+#     pitching_df.fillna(0, inplace=True)
+
+#     return batting_df, pitching_df

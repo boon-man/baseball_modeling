@@ -59,28 +59,65 @@ def add_suffix_to_columns(df, suffix, exclude_columns):
     return df
 
 
-def save_data(dataframes, file_names, start_year, end_year):
+def save_data(
+    *,
+    dataframes: list,
+    file_names: list[str],
+    start_year: int,
+    end_year: int,
+    dataset_tag: str | None = None,  # e.g., "train" or "pred"
+    data_folder: str = "data",
+) -> None:
     """
-    Saves multiple DataFrames to the 'data' folder with start and end year appended to each file name.
+    Save one or more DataFrames to disk with consistent, intention-revealing filenames.
 
-    Parameters:
-    dataframes (list of pd.DataFrame): List of DataFrames to be saved.
-    file_names (list of str): List of file names corresponding to each DataFrame.
-    start_year (int): Starting year for the data.
-    end_year (int): Ending year for the data.
+    Filenames follow the pattern:
+      - Multi-year range:  <file_name>_<tag>_<start>_<end>.csv
+      - Single year only:  <file_name>_<tag>_<year>.csv
 
-    Returns:
+    Examples
+    --------
+    - Training set spanning multiple years:
+        batting_data_train_2017_2024.csv
+    - Prediction set for a single year:
+        batting_data_pred_2025.csv
+
+    Parameters
+    ----------
+    dataframes : list[pd.DataFrame]
+        DataFrames to write.
+    file_names : list[str]
+        Base file names (e.g., ["batting_data", "pitching_data"]).
+    start_year : int
+        Start year included in the dataset.
+    end_year : int
+        End year included in the dataset.
+    dataset_tag : str | None, default None
+        Optional tag to distinguish dataset purpose, e.g. "train" or "pred".
+        If None, files are saved without a tag.
+    data_folder : str, default "data"
+        Output directory.
+
+    Returns
+    -------
     None
     """
-    data_folder = "data"
     os.makedirs(data_folder, exist_ok=True)
 
+    # Year suffix: single year uses one value, ranges use both.
+    if start_year == end_year:
+        year_suffix = f"{start_year}"
+    else:
+        year_suffix = f"{start_year}_{end_year}"
+
+    # Optional dataset tag.
+    tag_suffix = f"{dataset_tag}" if dataset_tag else ""
+
     for df, file_name in zip(dataframes, file_names):
-        df.to_csv(
-            os.path.join(data_folder, f"{file_name}_{start_year}_{end_year}.csv"),
-            index=False,
-        )
-    print(f"Data saved successfully.")
+        out_path = os.path.join(data_folder, f"{file_name}_{tag_suffix}_{year_suffix}.csv")
+        df.to_csv(out_path, index=False)
+
+    print("Data saved successfully.")
 
 
 def load_training_data():
