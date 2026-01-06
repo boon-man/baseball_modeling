@@ -111,14 +111,14 @@ def _validate_covid_impact(season, years):
 
 
 def _prior_year_bounds(year: int, window: int) -> tuple[int, int]:
-    # year=2022, window=3 => 2019-2021
-    end_y = year - 1
+    # year=2022, window=3 => 2020-2022
+    end_y = year
     start_y = end_y - window + 1
     return start_y, end_y
 
 
 def _career_year_bounds(end_year: int, career_years_back: int) -> tuple[int, int]:
-    # end_year=2023, career_years_back=20 => 2004-2023
+    # end_year=2023, career_years_back=10 => 2014-2023
     start_y = end_year - career_years_back + 1
     return start_y, end_year
 
@@ -271,7 +271,7 @@ def pull_data(
     """
 
     year_suffix = _year_suffix(start_year, end_year)
-    tag = f"_{dataset_tag}" if dataset_tag else ""
+    tag = f"{dataset_tag}" if dataset_tag else ""
 
     batting_path = f"data/batting_{tag}_{year_suffix}.csv"
     pitching_path = f"data/pitching_{tag}_{year_suffix}.csv"
@@ -306,11 +306,6 @@ def pull_data(
             split_seasons=True,
         ).filter(items=batting_stat_cols)
         calc_fantasy_points_batting(batting_current, "fantasy_points")
-
-        if include_future_target and year + 1 > end_year:
-            raise ValueError(
-                f"Future target requested for year={year}, but year+1 exceeds end_year."
-            )
 
         if include_future_target:
             # Future season (target)
@@ -386,11 +381,6 @@ def pull_data(
             split_seasons=True,
         ).filter(items=pitching_stat_cols)
         calc_fantasy_points_pitching(pitching_current, "fantasy_points")
-
-        if include_future_target and year + 1 > end_year:
-            raise ValueError(
-                f"Future target requested for year={year}, but year+1 exceeds end_year."
-            )
 
         if include_future_target:
             pitching_future = pitching_stats(

@@ -7,6 +7,70 @@ from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_error
 from hyperopt import fmin, tpe, Trials, STATUS_OK
 from IPython.display import display
 
+def calculate_delta(
+    df: pd.DataFrame,
+    fantasy_points_col: str = 'fantasy_points',
+    agg_fantasy_points_col: str = 'fantasy_points_agg',
+    agg_years: int = 3,
+    core_cols: list | None = None,
+    output_col: str = 'fantasy_points_delta'
+) -> pd.DataFrame:
+    """
+    Calculate deltas between current season values and multi-year averages for multiple columns.
+    
+    This metric reveals whether a player is performing above or below their historical average
+    across multiple statistics, useful for identifying breakout/breakdown seasons.
+    
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Input dataframe containing player season data.
+    fantasy_points_col : str, default 'fantasy_points'
+        Column name containing current season fantasy points.
+    agg_fantasy_points_col : str, default 'fantasy_points_agg'
+        Column name containing aggregated fantasy points over multiple years.
+    agg_years : int, default 3
+        Number of years used in the aggregation (for calculating average).
+    core_cols : list, optional
+        List of column names to calculate deltas for. If provided, deltas will be calculated
+        for these columns in addition to fantasy_points. Column names should not include the
+        year suffix (e.g., 'HR' not 'HR3'). The function expects aggregated columns named
+        as 'column_name' + str(agg_years).
+    output_col : str, default 'fantasy_points_delta'
+        Name of the output column for fantasy points delta. For career_cols, output columns
+        are named as 'column_name_delta'.
+    
+    Returns
+    -------
+    pd.DataFrame
+        Input dataframe with new columns containing deltas for fantasy_points and career_cols.
+        Delta = Current Season Value - (Aggregated Value / Years)
+    
+    Notes
+    -----
+    Positive deltas indicate above-average performance; negative deltas indicate below-average.
+    """
+    df = df.copy()
+    
+    # Calculate fantasy points delta
+    avg_fantasy_points = df[agg_fantasy_points_col] / agg_years
+    df[output_col] = df[fantasy_points_col] - avg_fantasy_points
+    
+    # Calculate deltas for career columns if provided
+    if core_cols:
+        for col in core_cols:
+            if col == 'IDfg':
+                continue
+            
+            agg_col = f'{col}{agg_years}'
+            delta_col = f'{col}_delta'
+            
+            # Only calculate if aggregated column exists
+            if agg_col in df.columns:
+                avg_col = df[agg_col] / agg_years
+                df[delta_col] = df[col] - avg_col
+    
+    return df
 
 def scale_numeric_columns(dfs: list, target_variable: str) -> list:
     """
