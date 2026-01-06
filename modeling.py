@@ -72,6 +72,74 @@ def calculate_delta(
     
     return df
 
+def calculate_productivity_score(
+    df: pd.DataFrame,
+    fantasy_points_col: str = 'fantasy_points',
+    age_col: str = 'Age',
+    output_col: str = 'productivity_score'
+) -> pd.DataFrame:
+    """
+    Calculate productivity score features based on player age and fantasy points.
+    
+    Creates three productivity metrics:
+    1. Adjusted productivity: fantasy_points / (age^2)
+    2. Productivity trend: change from previous season
+    3. 3-year rolling average productivity
+    
+    This helps identify players performing above/below their career arc.
+    
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Input dataframe containing player season data.
+    fantasy_points_col : str, default 'fantasy_points'
+        Column name containing fantasy points.
+    age_col : str, default 'Age'
+        Column name containing player age.
+    output_col : str, default 'productivity_score'
+        Base name for output columns (suffixes added for trend and 3yr).
+    
+    Returns
+    -------
+    pd.DataFrame
+        Input dataframe with three new columns:
+        - 'productivity_score': fantasy_points / (age^2)
+        - 'productivity_trend': change from previous season
+        - 'productivity_3yr': 3-year rolling average
+    
+    Notes
+    -----
+    Productivity score higher values indicate better efficiency relative to age.
+    Trend can be positive (improving) or negative (declining).
+    """
+    df = df.copy()
+
+    # Sort by player and season to ensure correct grouped operations
+    df = df.sort_values(by=['IDfg', 'Season']).reset_index(drop=True)
+    
+    # Calculate age squared
+    df['age_squared'] = df[age_col] ** 2
+    
+    # Create adjusted productivity score (points / age^2)
+    df[output_col] = df[fantasy_points_col] / df['age_squared']
+    
+    # Calculate productivity trend (change from previous season)
+    # Group by player ID to ensure we're comparing within-player seasons
+    df['productivity_trend'] = df.groupby('IDfg')[output_col].diff()
+    
+    # Calculate 3-year rolling average productivity
+    df['productivity_3yr'] = df.groupby('IDfg')[output_col].transform(
+        lambda x: x.rolling(window=3, min_periods=1).mean()
+    )
+    
+    # Drop the temporary age_squared column
+    df = df.drop(columns=['age_squared'])
+
+    # Fill NaN values in trend with 0 (no change for first season)
+    df['productivity_trend'] = df['productivity_trend'].fillna(0)
+    
+    return df
+
 def scale_numeric_columns(dfs: list, target_variable: str) -> list:
     """
     Scales numeric columns in a list of DataFrames using standardization.
