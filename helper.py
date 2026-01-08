@@ -1,7 +1,7 @@
 import pandas as pd
 from datetime import datetime
+from modeling import calculate_delta
 import os
-
 
 def calc_fantasy_points_batting(df, column_name):
     """
@@ -42,6 +42,21 @@ def calc_fantasy_points_pitching(df, column_name):
     df[column_name] = (df["W"] * 5) + (df["SO"] * 3) + (df["IP"] * 3) + (df["ER"] * -3)
     return df
 
+def _filter_positive_future(df: pd.DataFrame, target_col: str = "fantasy_points_future") -> pd.DataFrame:
+    return (
+        df.loc[df[target_col] > 0]
+        .reset_index(drop=True)
+    )
+
+def _add_deltas(df: pd.DataFrame, *, agg_years: int, core_cols: list[str]) -> pd.DataFrame:
+    return calculate_delta(
+        df,
+        fantasy_points_col="fantasy_points",
+        agg_fantasy_points_col=f"fantasy_points_prior{agg_years}",
+        agg_years=agg_years,
+        core_cols=core_cols,
+        output_col="fantasy_points_delta",
+    )
 
 def add_suffix_to_columns(df, suffix, exclude_columns):
     """

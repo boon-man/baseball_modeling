@@ -123,10 +123,6 @@ def calculate_productivity_score(
     # Create adjusted productivity score (points / age^2)
     df[output_col] = df[fantasy_points_col] / df['age_squared']
     
-    # Calculate productivity trend (change from previous season)
-    # Group by player ID to ensure we're comparing within-player seasons
-    df['productivity_trend'] = df.groupby('IDfg')[output_col].diff()
-    
     # Calculate 3-year rolling average productivity
     df['productivity_3yr'] = df.groupby('IDfg')[output_col].transform(
         lambda x: x.rolling(window=3, min_periods=1).mean()
@@ -268,6 +264,7 @@ def create_baseline(
         subsample=0.8,
         colsample_bytree=0.8,
         random_state=1234,
+        enable_categorical=True,
     )
 
     # Fit the model, drop ID column from datasets prior to fitting
@@ -359,6 +356,7 @@ def tune_xgb(
             reg_lambda=float(params["reg_lambda"]),
             reg_alpha=float(params["reg_alpha"]),
             gamma=float(params["gamma"]),
+            enable_categorical=True,
             n_estimators=2000,
             random_state=random_state,
             n_jobs=-1,
@@ -497,6 +495,7 @@ def create_model(
     model = XGBRegressor(
         objective="reg:squarederror",
         **final_params,
+        enable_categorical=True,
         n_estimators=2000,
         random_state=random_state,
         n_jobs=-1,

@@ -8,7 +8,9 @@ from helper import (
     split_name,
 )
 import os
-from typing import Callable, Literal, Optional
+from pathlib import Path
+from typing import Callable, Literal, Optional, Iterable
+import time
 import requests
 from bs4 import BeautifulSoup
 
@@ -76,6 +78,220 @@ def pull_projections(url: str):
 
     return df
 
+# Casting categorical feature dtypes for modeling, when reading in files from CSV
+def cast_feature_dtypes(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+
+    # This one is fine as category (comes from pd.cut labels)
+    if "overall_pick_bucket" in out.columns:
+        out["overall_pick_bucket"] = out["overall_pick_bucket"].astype("category")
+
+    # Convert to python object first, THEN to category (avoids string[python] categories)
+    if "birth_country" in out.columns:
+        out["birth_country"] = (
+            out["birth_country"]
+            .astype("object")          # <--- important
+            .fillna("Unknown")
+            .astype("category")
+        )
+
+    return out
+
+# Ensure only numeric columns are filled when cleaning NaNs
+def fillna_numeric_only(df: pd.DataFrame, value: float = 0) -> pd.DataFrame:
+    num_cols = df.select_dtypes(include=["number"]).columns
+    return df.assign(**{c: df[c].fillna(value) for c in num_cols})
+
+def _fetch_player_origin(mlbam_ids: pd.Series) -> pd.DataFrame:
+    ids = (
+        mlbam_ids
+        .dropna()
+        .astype(int)
+        .drop_duplicates()
+        .tolist()
+    )
+
+    rows = []
+    url = "https://statsapi.mlb.com/api/v1/people"
+
+    for i in range(0, len(ids), 50):
+        chunk = ids[i:i+50]
+        r = requests.get(url, params={"personIds": ",".join(map(str, chunk))}, timeout=30)
+        r.raise_for_status()
+
+        for p in r.json().get("people", []):
+            rows.append({
+                "mlbam_id": p.get("id"),
+                "birth_country": p.get("birthCountry"),
+            })
+
+    return (
+        pd.DataFrame(rows)
+        .assign(
+            mlbam_id=lambda d: pd.to_numeric(d["mlbam_id"], errors="coerce").astype("Int64"),
+            birth_country=lambda d: d["birth_country"].astype("string"),
+        )
+    )
+
+def _fetch_draft_year(year: int) -> pd.DataFrame:
+    """
+    Pull /api/v1/draft/{year} and return one row per pick.
+    """
+    url = f"https://statsapi.mlb.com/api/v1/draft/{year}"
+    r = requests.get(url, timeout=60)
+    r.raise_for_status()
+    payload = r.json()
+
+    rows = []
+    drafts = (payload or {}).get("drafts", {})
+    for rnd in drafts.get("rounds", []):
+        for pick in rnd.get("picks", []):
+            person = pick.get("person") or {}
+            team = pick.get("team") or {}
+            school = pick.get("school") or {}
+
+            rows.append(
+                {
+                    "draft_year": year,
+                    "mlbam_id": person.get("id"),
+                    "pick_round": pick.get("pickRound"),
+                    "round_pick_number": pick.get("roundPickNumber"),
+                    "overall_pick_number": pick.get("pickNumber"),  # overall pick :contentReference[oaicite:2]{index=2}
+                    "team_id": team.get("id"),
+                    "team_name": team.get("name"),
+                    "draft_type": (pick.get("draftType") or {}).get("code"),
+                    "is_drafted": pick.get("isDrafted"),
+                    "is_pass": pick.get("isPass"),
+                    "signing_bonus": pick.get("signingBonus"),
+                    "pick_value": pick.get("pickValue"),
+                    "school_name": school.get("name"),
+                    "school_class": school.get("schoolClass"),
+                }
+            )
+
+    return (
+        pd.DataFrame(rows)
+        .assign(
+            mlbam_id=lambda d: pd.to_numeric(d["mlbam_id"], errors="coerce").astype("Int64"),
+            overall_pick_number=lambda d: pd.to_numeric(d["overall_pick_number"], errors="coerce").astype("Int64"),
+            round_pick_number=lambda d: pd.to_numeric(d["round_pick_number"], errors="coerce").astype("Int64"),
+            draft_year=lambda d: pd.to_numeric(d["draft_year"], errors="coerce").astype("Int64"),
+        )
+    )
+
+
+def build_or_update_draft_cache(
+    year_start: int,
+    year_end: int,
+    cache_path: str | Path = "data/draft/draft_picks_cache.csv",
+) -> pd.DataFrame:
+    """
+    Builds/updates a cache of draft picks across years [year_start, year_end].
+    Only fetches missing years if cache exists.
+    """
+    cache_path = Path(cache_path)
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+
+    if cache_path.exists():
+        cached = pd.read_csv(cache_path)
+        cached["draft_year"] = pd.to_numeric(cached["draft_year"], errors="coerce").astype("Int64")
+        existing_years = set(cached["draft_year"].dropna().astype(int).unique().tolist())
+    else:
+        cached = pd.DataFrame()
+        existing_years = set()
+
+    target_years = set(range(year_start, year_end + 1))
+    missing_years = sorted(list(target_years - existing_years))
+
+    new_parts = []
+    for y in missing_years:
+        try:
+            new_parts.append(_fetch_draft_year(y))
+        except Exception:
+            # if a year fails, skip it (you can log/raise if you prefer)
+            continue
+
+    if new_parts:
+        updated = pd.concat([cached, *new_parts], ignore_index=True) if not cached.empty else pd.concat(new_parts, ignore_index=True)
+        updated.to_csv(cache_path, index=False)
+        return updated
+
+    return cached
+
+
+def add_overall_pick_features(
+    df: pd.DataFrame,
+    year_start: int = 1975,
+    cache_path: str | Path = "data/draft/draft_picks_cache.csv",
+) -> pd.DataFrame:
+    """
+    Adds overall pick info to a season-level dataframe via mlbam_id.
+    Uses the player's earliest draft year (min draft_year) as canonical.
+    """
+    draft_cache = build_or_update_draft_cache(
+        year_start=year_start,
+        year_end=int(df["Season"].max()),
+        cache_path=cache_path,
+    )
+
+    # Reduce to 1 row per player (earliest draft year, keep that pick)
+    draft_one = (
+        draft_cache
+        .dropna(subset=["mlbam_id", "draft_year", "overall_pick_number"])
+        .sort_values(["mlbam_id", "draft_year", "overall_pick_number"])
+        .groupby("mlbam_id", as_index=False)
+        .head(1)
+        .rename(
+            columns={
+                "draft_year": "draft_year",
+                "overall_pick_number": "draft_overall_pick",
+                "pick_round": "draft_round",
+                "round_pick_number": "draft_round_pick",
+                "team_id": "draft_team_id",
+                "team_name": "draft_team_name",
+            }
+        )
+        .filter(items=[
+            "mlbam_id",
+            "draft_year",
+            "draft_overall_pick",
+        ])
+    )
+
+    out = (
+        df.merge(draft_one, on="mlbam_id", how="left")
+        .assign(
+            is_drafted=lambda d: d["draft_overall_pick"].notna().astype(int),
+            years_since_draft=lambda d: (d["Season"] - d["draft_year"]).astype("Float64"),
+            # modeling-friendly buckets
+            overall_pick_bucket=lambda d: pd.cut(
+                d["draft_overall_pick"].astype("Float64"),
+                bins=[-float("inf"), 10, 50, 100, 200, float("inf")],
+                labels=["top10", "11-50", "51-100", "101-200", "200+"],
+            ),
+        )
+    )
+
+    # Step to incorporate player country of origin into the dataset
+    origin_df = _fetch_player_origin(out["mlbam_id"])
+
+    out = (
+        out
+        .merge(origin_df, on="mlbam_id", how="left")
+        .assign(
+            is_international=lambda d: (
+                d["birth_country"].notna()
+                & ~d["birth_country"].isin(["USA", "United States", "US"])
+            ).astype(int),
+
+            # Undrafted international player flag
+            is_intl_undrafted=lambda d: (
+                (d["draft_overall_pick"].isna()) & (d["is_international"] == 1)
+            ).astype(int),
+        )
+    )
+    return out
+
 def _player_history_lookup(df: pd.DataFrame) -> pd.DataFrame:
     """
     Pulls player data from the pybaseball API and merges it with the provided DataFrame to obtain player rookie seasons.
@@ -87,17 +303,36 @@ def _player_history_lookup(df: pd.DataFrame) -> pd.DataFrame:
     pd.DataFrame: The DataFrame with the player data added.
     """
 
-    player_ids = df["IDfg"].unique().tolist()
-    player_ids = playerid_reverse_lookup(player_ids, key_type="fangraphs").filter(
-        items=["key_fangraphs", "mlb_played_first"]
+    player_ids = (
+        df["IDfg"]
+        .dropna()
+        .unique()
+        .tolist()
     )
-    player_ids = player_ids.rename(
-        columns={"key_fangraphs": "IDfg", "mlb_played_first": "rookie_year"}
-    )
-    df = df.merge(player_ids, on="IDfg", how="left")
 
-    # Add total years in league to the data for each player for context on eligible playing years
-    df["years_in_league"] = df["Season"] - df["rookie_year"]
+    id_map = (
+        playerid_reverse_lookup(player_ids, key_type="fangraphs")
+        .filter(items=["key_fangraphs", "key_mlbam", "mlb_played_first"])
+        .rename(
+            columns={
+                "key_fangraphs": "IDfg",
+                "key_mlbam": "mlbam_id",
+                "mlb_played_first": "rookie_year",
+            }
+        )
+        .assign(
+            rookie_year=lambda d: pd.to_numeric(d["rookie_year"], errors="coerce"),
+            mlbam_id=lambda d: pd.to_numeric(d["mlbam_id"], errors="coerce").astype("Int64"),
+        )
+    )
+
+    df = (
+        df.merge(id_map, on="IDfg", how="left")
+        .assign(
+            years_in_league=lambda d: d["Season"] - d["rookie_year"],
+        )
+    )
+
     return df
 
 
@@ -115,7 +350,6 @@ def _prior_year_bounds(year: int, window: int) -> tuple[int, int]:
     end_y = year
     start_y = end_y - window + 1
     return start_y, end_y
-
 
 def _career_year_bounds(end_year: int, career_years_back: int) -> tuple[int, int]:
     # end_year=2023, career_years_back=10 => 2014-2023
@@ -473,11 +707,22 @@ def pull_data(
     # -------------------------
     # Player metadata + cleanup
     # -------------------------
-    batting_df = _player_history_lookup(batting_df)
-    pitching_df = _player_history_lookup(pitching_df)
+    batting_df = (
+        batting_df
+        .pipe(_player_history_lookup)
+        .pipe(add_overall_pick_features)
+        .drop(columns=["mlbam_id"], errors="ignore")
+    )
 
-    batting_df = batting_df.fillna(0)
-    pitching_df = pitching_df.fillna(0)
+    pitching_df = (
+        pitching_df
+        .pipe(_player_history_lookup)
+        .pipe(add_overall_pick_features)
+        .drop(columns=["mlbam_id"], errors="ignore")
+    )
+
+    batting_df = fillna_numeric_only(batting_df, value=0)
+    pitching_df = fillna_numeric_only(pitching_df, value=0)
 
     save_data(
             dataframes=[batting_df, pitching_df],
