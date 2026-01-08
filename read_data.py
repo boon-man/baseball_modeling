@@ -464,7 +464,6 @@ def pull_data(
     batting_career_cols: list,
     pitching_career_cols: list,
     include_future_target: bool,
-    dataset_tag: str,
     career_window_years: int = 10,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """
@@ -493,8 +492,6 @@ def pull_data(
         List of columns to include for pitching career aggregates.
     include_future_target : bool
         Whether to include future season fantasy points as target variable.
-    dataset_tag : str
-        Tag to append to saved dataset filenames (e.g., "train" or "pred").
     career_window_years : int, default 10
         Number of years to use for career aggregates.
 
@@ -505,10 +502,9 @@ def pull_data(
     """
 
     year_suffix = _year_suffix(start_year, end_year)
-    tag = f"{dataset_tag}" if dataset_tag else ""
 
-    batting_path = f"data/batting_{tag}_{year_suffix}.csv"
-    pitching_path = f"data/pitching_{tag}_{year_suffix}.csv"
+    batting_path = f"data/batting_{year_suffix}.csv"
+    pitching_path = f"data/pitching_{year_suffix}.csv"
 
     if os.path.exists(batting_path) and os.path.exists(pitching_path):
         batting_df = pd.read_csv(batting_path)
@@ -729,7 +725,6 @@ def pull_data(
             file_names=["batting", "pitching"],
             start_year=start_year,
             end_year=end_year,
-            dataset_tag=dataset_tag,
     )
 
     print("Data pull complete.")
@@ -762,7 +757,6 @@ def pull_training_data(
         pitching_career_cols=pitching_career_cols,
         career_window_years=career_window_years,
         include_future_target=True, # Include future target for training data
-        dataset_tag="train",
     )
 
 
@@ -788,7 +782,6 @@ def pull_prediction_data(
         pitching_career_cols=pitching_career_cols,
         career_window_years=career_window_years,
         include_future_target=False, # No future target for prediction data
-        dataset_tag="pred",
     )
 
 # def pull_prediction_data(

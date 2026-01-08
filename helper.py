@@ -80,7 +80,6 @@ def save_data(
     file_names: list[str],
     start_year: int,
     end_year: int,
-    dataset_tag: str | None = None,  # e.g., "train" or "pred"
     data_folder: str = "data",
 ) -> None:
     """
@@ -107,8 +106,6 @@ def save_data(
         Start year included in the dataset.
     end_year : int
         End year included in the dataset.
-    dataset_tag : str | None, default None
-        Optional tag to distinguish dataset purpose, e.g. "train" or "pred".
         If None, files are saved without a tag.
     data_folder : str, default "data"
         Output directory.
@@ -125,11 +122,8 @@ def save_data(
     else:
         year_suffix = f"{start_year}_{end_year}"
 
-    # Optional dataset tag.
-    tag_suffix = f"{dataset_tag}" if dataset_tag else ""
-
     for df, file_name in zip(dataframes, file_names):
-        out_path = os.path.join(data_folder, f"{file_name}_{tag_suffix}_{year_suffix}.csv")
+        out_path = os.path.join(data_folder, f"{file_name}_{year_suffix}.csv")
         df.to_csv(out_path, index=False)
 
     print("Data saved successfully.")

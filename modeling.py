@@ -123,6 +123,10 @@ def calculate_productivity_score(
     # Create adjusted productivity score (points / age^2)
     df[output_col] = df[fantasy_points_col] / df['age_squared']
     
+    # Calculate productivity trend (change from previous season)
+    # Group by player ID to ensure we're comparing within-player seasons
+    df['productivity_trend'] = df.groupby('IDfg')[output_col].diff()
+    
     # Calculate 3-year rolling average productivity
     df['productivity_3yr'] = df.groupby('IDfg')[output_col].transform(
         lambda x: x.rolling(window=3, min_periods=1).mean()
