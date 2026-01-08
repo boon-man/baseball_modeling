@@ -42,12 +42,6 @@ def calc_fantasy_points_pitching(df, column_name):
     df[column_name] = (df["W"] * 5) + (df["SO"] * 3) + (df["IP"] * 3) + (df["ER"] * -3)
     return df
 
-def _filter_positive_future(df: pd.DataFrame, target_col: str = "fantasy_points_future") -> pd.DataFrame:
-    return (
-        df.loc[df[target_col] > 0]
-        .reset_index(drop=True)
-    )
-
 def _add_deltas(df: pd.DataFrame, *, agg_years: int, core_cols: list[str]) -> pd.DataFrame:
     return calculate_delta(
         df,

@@ -463,7 +463,6 @@ def pull_data(
     pitching_stat_cols: list,
     batting_career_cols: list,
     pitching_career_cols: list,
-    include_future_target: bool,
     career_window_years: int = 10,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """
@@ -537,7 +536,7 @@ def pull_data(
         ).filter(items=batting_stat_cols)
         calc_fantasy_points_batting(batting_current, "fantasy_points")
 
-        if include_future_target:
+        if year < end_year:
             # Future season (target)
             batting_future = batting_stats(
                 start_season=year + 1,
@@ -596,7 +595,7 @@ def pull_data(
         )
 
         # Append future target if pulling training data
-        if include_future_target:
+        if year < end_year:
             batting_year = batting_year.merge(
                 batting_future, on="IDfg", how="left"
         )
@@ -612,7 +611,7 @@ def pull_data(
         ).filter(items=pitching_stat_cols)
         calc_fantasy_points_pitching(pitching_current, "fantasy_points")
 
-        if include_future_target:
+        if year < end_year:
             pitching_future = pitching_stats(
                 start_season=year + 1,
                 qual=15,
@@ -669,7 +668,7 @@ def pull_data(
         )
 
         # Append future target if pulling training data
-        if include_future_target:
+        if year < end_year:
             pitching_year = pitching_year.merge(
                 pitching_future, on="IDfg", how="left"
         )
@@ -756,7 +755,6 @@ def pull_training_data(
         batting_career_cols=batting_career_cols,
         pitching_career_cols=pitching_career_cols,
         career_window_years=career_window_years,
-        include_future_target=True, # Include future target for training data
     )
 
 
@@ -781,7 +779,6 @@ def pull_prediction_data(
         batting_career_cols=batting_career_cols,
         pitching_career_cols=pitching_career_cols,
         career_window_years=career_window_years,
-        include_future_target=False, # No future target for prediction data
     )
 
 # def pull_prediction_data(
