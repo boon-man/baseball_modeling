@@ -7,6 +7,138 @@ from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_error
 from hyperopt import fmin, tpe, Trials, STATUS_OK
 from IPython.display import display
 
+def calculate_delta(
+    df: pd.DataFrame,
+    fantasy_points_col: str = 'fantasy_points',
+    agg_fantasy_points_col: str = 'fantasy_points_agg',
+    agg_years: int = 3,
+    core_cols: list | None = None,
+    output_col: str = 'fantasy_points_delta'
+) -> pd.DataFrame:
+    """
+    Calculate deltas between current season values and multi-year averages for multiple columns.
+    
+    This metric reveals whether a player is performing above or below their historical average
+    across multiple statistics, useful for identifying breakout/breakdown seasons.
+    
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Input dataframe containing player season data.
+    fantasy_points_col : str, default 'fantasy_points'
+        Column name containing current season fantasy points.
+    agg_fantasy_points_col : str, default 'fantasy_points_agg'
+        Column name containing aggregated fantasy points over multiple years.
+    agg_years : int, default 3
+        Number of years used in the aggregation (for calculating average).
+    core_cols : list, optional
+        List of column names to calculate deltas for. If provided, deltas will be calculated
+        for these columns in addition to fantasy_points. Column names should not include the
+        year suffix (e.g., 'HR' not 'HR3'). The function expects aggregated columns named
+        as 'column_name' + str(agg_years).
+    output_col : str, default 'fantasy_points_delta'
+        Name of the output column for fantasy points delta. For career_cols, output columns
+        are named as 'column_name_delta'.
+    
+    Returns
+    -------
+    pd.DataFrame
+        Input dataframe with new columns containing deltas for fantasy_points and career_cols.
+        Delta = Current Season Value - (Aggregated Value / Years)
+    
+    Notes
+    -----
+    Positive deltas indicate above-average performance; negative deltas indicate below-average.
+    """
+    df = df.copy()
+    
+    # Calculate fantasy points delta
+    avg_fantasy_points = df[agg_fantasy_points_col] / agg_years
+    df[output_col] = df[fantasy_points_col] - avg_fantasy_points
+    
+    # Calculate deltas for career columns if provided
+    if core_cols:
+        for col in core_cols:
+            if col == 'IDfg':
+                continue
+            
+            agg_col = f'{col}{agg_years}'
+            delta_col = f'{col}_delta'
+            
+            # Only calculate if aggregated column exists
+            if agg_col in df.columns:
+                avg_col = df[agg_col] / agg_years
+                df[delta_col] = df[col] - avg_col
+    
+    return df
+
+def calculate_productivity_score(
+    df: pd.DataFrame,
+    fantasy_points_col: str = 'fantasy_points',
+    age_col: str = 'Age',
+    output_col: str = 'productivity_score'
+) -> pd.DataFrame:
+    """
+    Calculate productivity score features based on player age and fantasy points.
+    
+    Creates three productivity metrics:
+    1. Adjusted productivity: fantasy_points / (age^2)
+    2. Productivity trend: change from previous season
+    3. 3-year rolling average productivity
+    
+    This helps identify players performing above/below their career arc.
+    
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Input dataframe containing player season data.
+    fantasy_points_col : str, default 'fantasy_points'
+        Column name containing fantasy points.
+    age_col : str, default 'Age'
+        Column name containing player age.
+    output_col : str, default 'productivity_score'
+        Base name for output columns (suffixes added for trend and 3yr).
+    
+    Returns
+    -------
+    pd.DataFrame
+        Input dataframe with three new columns:
+        - 'productivity_score': fantasy_points / (age^2)
+        - 'productivity_trend': change from previous season
+        - 'productivity_3yr': 3-year rolling average
+    
+    Notes
+    -----
+    Productivity score higher values indicate better efficiency relative to age.
+    Trend can be positive (improving) or negative (declining).
+    """
+    df = df.copy()
+
+    # Sort by player and season to ensure correct grouped operations
+    df = df.sort_values(by=['IDfg', 'Season']).reset_index(drop=True)
+    
+    # Calculate age squared
+    df['age_squared'] = df[age_col] ** 2
+    
+    # Create adjusted productivity score (points / age^2)
+    df[output_col] = df[fantasy_points_col] / df['age_squared']
+    
+    # Calculate productivity trend (change from previous season)
+    # Group by player ID to ensure we're comparing within-player seasons
+    df['productivity_trend'] = df.groupby('IDfg')[output_col].diff()
+    
+    # Calculate 3-year rolling average productivity
+    df['productivity_3yr'] = df.groupby('IDfg')[output_col].transform(
+        lambda x: x.rolling(window=3, min_periods=1).mean()
+    )
+    
+    # Drop the temporary age_squared column
+    df = df.drop(columns=['age_squared'])
+
+    # Fill NaN values in trend with 0 (no change for first season)
+    df['productivity_trend'] = df['productivity_trend'].fillna(0)
+    
+    return df
 
 def scale_numeric_columns(dfs: list, target_variable: str) -> list:
     """
@@ -136,6 +268,7 @@ def create_baseline(
         subsample=0.8,
         colsample_bytree=0.8,
         random_state=1234,
+        enable_categorical=True,
     )
 
     # Fit the model, drop ID column from datasets prior to fitting
@@ -227,6 +360,7 @@ def tune_xgb(
             reg_lambda=float(params["reg_lambda"]),
             reg_alpha=float(params["reg_alpha"]),
             gamma=float(params["gamma"]),
+            enable_categorical=True,
             n_estimators=2000,
             random_state=random_state,
             n_jobs=-1,
@@ -365,6 +499,7 @@ def create_model(
     model = XGBRegressor(
         objective="reg:squarederror",
         **final_params,
+        enable_categorical=True,
         n_estimators=2000,
         random_state=random_state,
         n_jobs=-1,

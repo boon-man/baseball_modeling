@@ -1,4 +1,5 @@
 import pandas as pd
+import numpy as np
 import matplotlib.pyplot as plt
 from sklearn.cluster import KMeans
 
@@ -34,40 +35,207 @@ def assign_position_group(df: pd.DataFrame, position_col: str):
     return df
 
 
-def calculate_relative_value(df: pd.DataFrame, position_col: str, projection_col: str):
-    """
-    Calculates the relative value score for each player based on their positional group.
 
-    Parameters:
-    df (pd.DataFrame): The DataFrame containing player data.
-    position_col (str): The column name indicating the player's positional group.
-    projection_col (str): The column name indicating the player's projected value.
-
-    Returns:
-    pd.DataFrame: The DataFrame with an additional 'relative_value' column.
+def _apply_position_dampening(
+    df: pd.DataFrame,
+    *,
+    position_col: str = "position_group",
+    value_col: str = "relative_value",
+    dampening_map: dict[str, float] | None = None,
+    adjustment_col: str = "pos_adjustment",
+) -> pd.DataFrame:
     """
-    # Group by positional group and calculate mean and standard deviation
-    grouped_stats = (
-        df.groupby(position_col)[projection_col]
-        .agg(["mean", "std"])
-        .rename(columns={"mean": "group_mean", "std": "group_std"})
+    Apply position-based dampening multipliers to a value column.
+
+    This is intended to reduce or increase the influence of certain position groups
+    on final rankings (e.g., to avoid model-driven over-inflation of one group).
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Input dataframe containing position groups and a value column.
+    position_col : str, default "position_group"
+        Column containing the position grouping (e.g., "IF", "OF", "P", "C").
+    value_col : str, default "relative_value"
+        Column containing the pre-dampened value metric to adjust.
+    dampening_map : dict[str, float] | None, default None
+        Mapping from position group -> multiplier. Unspecified groups default to 1.0.
+        Example: {"P": 0.85, "C": 0.95, "IF": 1.05, "OF": 1.10}
+    adjustment_col : str, default "pos_adjustment"
+        Name of the multiplier column to create (kept for transparency).
+
+    Returns
+    -------
+    pd.DataFrame
+        Copy of `df` with `adjustment_col` and dampened `value_col`.
+    """
+    out = df.copy()
+
+    if dampening_map is None:
+        dampening_map = {}
+
+    out[adjustment_col] = out[position_col].map(dampening_map).fillna(1.0).astype(float)
+    out[value_col] = out[value_col] * out[adjustment_col]
+
+    return out
+
+def calculate_relative_value(
+    df: pd.DataFrame,
+    *,
+    position_col: str = "position_group",
+    projection_col: str = "final_projection",
+    vorp_cutoff: float = 0.66,
+    z_weight: float = 0.50,
+    vorp_weight: float = 0.50,
+    vorp_scale: float = 2.25,
+    dampening_map: dict[str, float] | None = None,
+) -> pd.DataFrame:
+    """
+    Compute an NFL-style Relative Value metric for MLB using:
+      - Z-score scaled projection within each position group
+      - VORP (Value Over Replacement Player) within each position group
+      - optional position dampening multipliers
+
+    This assumes the player pool has *already* been filtered to your top-N cutoffs
+    (as you noted your pipeline already does).
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Player pool dataframe.
+    position_col : str, default "position_group"
+        Position grouping column.
+    projection_col : str, default "final_projection"
+        Projection column used for rankings and value.
+    vorp_cutoff : float, default 0.66
+        Percentile (as a fraction of the position cutoff pool) that defines the "replacement" rank.
+        Example: 0.66 means replacement rank is roughly the 66th percentile of the pool
+        (implemented as round(n_in_group * vorp_cutoff), min 1).
+    z_weight : float, default 0.50
+        Weight applied to the z-score scaled projection component.
+    vorp_weight : float, default 0.50
+        Weight applied to the VORP component (after scaling).
+    vorp_scale : float, default 2.25
+        Multiplier applied to VORP to increase its spread before blending.
+    dampening_map : dict[str, float] | None, default None
+        Optional dampening multipliers per position group.
+
+    Returns
+    -------
+    pd.DataFrame
+        Dataframe with:
+        - position_rank
+        - replacement_value
+        - z_score_value
+        - vorp
+        - relative_value (dampened if provided)
+        - overall_ranking (dense)
+    """
+    required = {position_col, projection_col}
+    missing = required - set(df.columns)
+    if missing:
+        raise ValueError(f"Missing required columns: {sorted(missing)}")
+
+    out = df.copy()
+
+    # -----------------------------
+    # Position ranks by projection
+    # -----------------------------
+    out["position_rank"] = (
+        out.groupby(position_col)[projection_col]
+        .rank(method="dense", ascending=False)
+        .astype(int)
     )
-    # Merge the calculated stats back into the original dataframe
-    df = df.merge(grouped_stats, on=position_col, how="left")
-    # Compute the relative value score
-    df["relative_value"] = (
-        (df[projection_col] - df["group_mean"]) / df["group_std"]
-    ) * df[projection_col]
-    # Handle potential division by zero (if std is 0)
-    df["relative_value"].fillna(0, inplace=True)
 
-    # Define final player rankings based on relative positional value scores
-    df["final_ranking"] = df["relative_value"].rank(ascending=False)
-    # Drop intermediate columns if needed
-    df.drop(columns=["group_mean", "group_std"], inplace=True)
+    # -----------------------------
+    # Replacement value per position
+    # (based on *current player pool size*)
+    # -----------------------------
+    replacement_rows = []
 
-    return df
+    for pos, g in out.groupby(position_col, sort=False):
+        n = len(g)
+        # replacement rank is fraction of the pool; ensure >= 1
+        repl_rank = max(1, int(round(n * vorp_cutoff)))
 
+        repl_val = (
+            g.loc[g["position_rank"] == repl_rank, projection_col]
+            .head(1)
+            .squeeze()
+        )
+
+        # If exact rank not found for some reason, fallback to nth best
+        if pd.isna(repl_val):
+            repl_val = g.sort_values(projection_col, ascending=False)[projection_col].iloc[
+                min(repl_rank - 1, n - 1)
+            ]
+
+        replacement_rows.append({position_col: pos, "replacement_value": float(repl_val)})
+
+    replacement_df = pd.DataFrame(replacement_rows)
+    out = out.merge(replacement_df, on=position_col, how="left")
+
+    # -----------------------------
+    # Z-score scaled projection within position
+    # -----------------------------
+    stats = (
+        out.groupby(position_col)[projection_col]
+        .agg(group_mean="mean", group_std="std")
+        .reset_index()
+    )
+    out = out.merge(stats, on=position_col, how="left")
+
+    safe_std = out["group_std"].replace(0, np.nan)
+    z = (out[projection_col] - out["group_mean"]) / safe_std
+    z = z.fillna(0.0)
+
+    out["z_score_value"] = z * out[projection_col]
+
+    # -----------------------------
+    # VORP + blend
+    # -----------------------------
+    out["vorp"] = out[projection_col] - out["replacement_value"]
+
+    out["relative_value"] = (
+        (z_weight * out["z_score_value"])
+        + (vorp_weight * (out["vorp"] * vorp_scale))
+    )
+
+    # -----------------------------
+    # Dampening by position group
+    # -----------------------------
+    out = _apply_position_dampening(
+        out,
+        position_col=position_col,
+        value_col="relative_value",
+        dampening_map=dampening_map,
+        adjustment_col="pos_adjustment",
+    )
+
+    # -----------------------------
+    # Enforce 1:1 ordering with projections inside each position group
+    # -----------------------------
+    out = out.sort_values([position_col, projection_col], ascending=[True, False])
+
+    # For each group: sort relative_value desc and assign in projection order
+    aligned_vals = []
+    for pos, g in out.groupby(position_col, sort=False):
+        sorted_vals = np.sort(g["relative_value"].to_numpy())[::-1]
+        aligned_vals.append(pd.Series(sorted_vals, index=g.index))
+
+    out["relative_value"] = pd.concat(aligned_vals).sort_index()
+
+    # -----------------------------
+    # Overall ranking
+    # -----------------------------
+    out["overall_ranking"] = (
+        out["relative_value"].rank(method="dense", ascending=False).astype(int)
+    )
+
+    # Cleanup intermediate stats columns if you want
+    out = out.drop(columns=["group_mean", "group_std"])
+
+    return out
 
 def determine_optimal_k(data: pd.DataFrame, max_k=10):
     """

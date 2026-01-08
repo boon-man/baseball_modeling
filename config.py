@@ -8,6 +8,13 @@ MLB_COLOR_PALETTE = [
     "#2F2F2F",  # near-black for accents
 ]
 
+# Dampening parameter for MLB positional groups
+POS_DAMPENING_MAP = {
+    "P": 1.00,    
+    "IF": 1.00,   
+    "OF": 1.00,   
+}
+
 # Columns for modeling player performance
 batting_stat_cols = [
     'IDfg', 'Season', 'Name', 'Age', 'G', 'AB', 'H', '1B', '2B', '3B', 'HR', 'R', 'RBI', 'HBP', 'BB', 'IBB', 'SO',

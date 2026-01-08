@@ -181,7 +181,7 @@ def plot_actual_vs_pred_mlb(
     max_y = df[actual_col].max()
 
     # Overperformers: left / upper region
-    over_x = 0.2 * max_x
+    over_x = 0.3 * max_x
     over_y = 0.8 * max_y
 
     # Underperformers: right / lower region
