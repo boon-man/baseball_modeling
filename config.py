@@ -10,9 +10,9 @@ MLB_COLOR_PALETTE = [
 
 # Dampening parameter for MLB positional groups
 POS_DAMPENING_MAP = {
-    "P": 1.00,    
-    "IF": 1.00,   
-    "OF": 1.00,   
+    "P": 0.85,    
+    "IF": 0.9,   
+    "OF": 1.25,   
 }
 
 # Columns for modeling player performance
@@ -34,11 +34,13 @@ pitching_stat_cols = [
 batting_career_cols = [
     "IDfg",
     "G", "AB", "H", "1B", "2B", "3B", "HR", "R", "RBI", "BB", "SO", "SB", 'HBP',
-    "AVG", "OBP", "SLG", "OPS", "BABIP", "ISO", "wRC+", "WAR",
+    "AVG", "OBP", "SLG", "OPS", "BABIP", "ISO", "wRC+", "RAR", "WAR", "wOBA",
+    "Barrels", "Barrel%", "HardHit%", "EV"
 ]
 
 pitching_career_cols = [
     "IDfg",
     "G", "GS", "IP", "TBF", "W", "SO", "BB", "HR", "ER",
-    "ERA", "FIP", "WHIP", "K/BB", "K-BB%", "WAR",
+    "ERA", "FIP", "WHIP", "K/BB", "K-BB%", "RAR", "WAR", "wOBA", "SIERA",
+    'Pitching+', 'Location+', 'Stuff+'
 ]

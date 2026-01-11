@@ -76,15 +76,17 @@ def calculate_productivity_score(
     df: pd.DataFrame,
     fantasy_points_col: str = 'fantasy_points',
     age_col: str = 'Age',
-    output_col: str = 'productivity_score'
+    output_col: str = 'productivity_score',
+    agg_years: int = 2
 ) -> pd.DataFrame:
     """
     Calculate productivity score features based on player age and fantasy points.
     
-    Creates three productivity metrics:
+    Creates five productivity metrics:
     1. Adjusted productivity: fantasy_points / (age^2)
     2. Productivity trend: change from previous season
-    3. 3-year rolling average productivity
+    3. Short-term rolling average: agg_years rolling average productivity
+    4. Long-term rolling average: 2 * agg_years rolling average productivity
     
     This helps identify players performing above/below their career arc.
     
@@ -97,15 +99,19 @@ def calculate_productivity_score(
     age_col : str, default 'Age'
         Column name containing player age.
     output_col : str, default 'productivity_score'
-        Base name for output columns (suffixes added for trend and 3yr).
+        Base name for output columns (suffixes added for trend and rolling windows).
+    agg_years : int, default 2
+        Number of years for the short-term rolling window. 
+        Long-term window will be 2 * agg_years.
     
     Returns
     -------
     pd.DataFrame
-        Input dataframe with three new columns:
+        Input dataframe with five new columns:
         - 'productivity_score': fantasy_points / (age^2)
         - 'productivity_trend': change from previous season
-        - 'productivity_3yr': 3-year rolling average
+        - 'productivity_{agg_years}yr': rolling average over agg_years
+        - 'productivity_{2*agg_years}yr': rolling average over 2*agg_years
     
     Notes
     -----
@@ -124,12 +130,18 @@ def calculate_productivity_score(
     df[output_col] = df[fantasy_points_col] / df['age_squared']
     
     # Calculate productivity trend (change from previous season)
-    # Group by player ID to ensure we're comparing within-player seasons
     df['productivity_trend'] = df.groupby('IDfg')[output_col].diff()
     
-    # Calculate 3-year rolling average productivity
-    df['productivity_3yr'] = df.groupby('IDfg')[output_col].transform(
-        lambda x: x.rolling(window=3, min_periods=1).mean()
+    # Calculate short-term rolling average productivity
+    short_window = agg_years
+    df[f'productivity_{short_window}yr'] = df.groupby('IDfg')[output_col].transform(
+        lambda x: x.rolling(window=short_window, min_periods=1).mean()
+    )
+    
+    # Calculate long-term rolling average productivity
+    long_window = agg_years * 2
+    df[f'productivity_{long_window}yr'] = df.groupby('IDfg')[output_col].transform(
+        lambda x: x.rolling(window=long_window, min_periods=1).mean()
     )
     
     # Drop the temporary age_squared column
