@@ -87,12 +87,26 @@ def cast_feature_dtypes(df: pd.DataFrame) -> pd.DataFrame:
         out["overall_pick_bucket"] = out["overall_pick_bucket"].astype("category")
     if "era" in out.columns:
         out["era"] = out["era"].astype("category")
+    if "primary_pos" in out.columns:
+        out["primary_pos"] = (
+            out["primary_pos"]
+            .astype("object")
+            .fillna("Unknown")
+            .astype("category")
+        )
+    if "pos_type" in out.columns:
+        out["pos_type"] = (
+            out["pos_type"]
+            .astype("object")
+            .fillna("Unknown")
+            .astype("category")
+        )
 
     # Convert to python object first, THEN to category (avoids string[python] categories)
     if "birth_country" in out.columns:
         out["birth_country"] = (
             out["birth_country"]
-            .astype("object")          # <--- important
+            .astype("object")
             .fillna("Unknown")
             .astype("category")
         )
@@ -104,7 +118,7 @@ def fillna_numeric_only(df: pd.DataFrame, value: float = 0) -> pd.DataFrame:
     num_cols = df.select_dtypes(include=["number"]).columns
     return df.assign(**{c: df[c].fillna(value) for c in num_cols})
 
-def _fetch_player_origin(mlbam_ids: pd.Series) -> pd.DataFrame:
+def _fetch_player_origin_and_position(mlbam_ids: pd.Series) -> pd.DataFrame:
     ids = (
         mlbam_ids
         .dropna()
@@ -118,12 +132,19 @@ def _fetch_player_origin(mlbam_ids: pd.Series) -> pd.DataFrame:
 
     for i in range(0, len(ids), 50):
         chunk = ids[i:i+50]
-        r = requests.get(url, params={"personIds": ",".join(map(str, chunk))}, timeout=30)
+        r = requests.get(
+            url,
+            params={"personIds": ",".join(map(str, chunk))},
+            timeout=30,
+        )
         r.raise_for_status()
 
         for p in r.json().get("people", []):
+            pos = p.get("primaryPosition") or {}
             rows.append({
                 "mlbam_id": p.get("id"),
+                "primary_pos": pos.get("code"),        # e.g. "P", "OF", "1B"
+                "pos_type": pos.get("type"),           # "Pitcher" or "Player"
                 "birth_country": p.get("birthCountry"),
             })
 
@@ -131,7 +152,8 @@ def _fetch_player_origin(mlbam_ids: pd.Series) -> pd.DataFrame:
         pd.DataFrame(rows)
         .assign(
             mlbam_id=lambda d: pd.to_numeric(d["mlbam_id"], errors="coerce").astype("Int64"),
-            birth_country=lambda d: d["birth_country"].astype("string"),
+            primary_pos=lambda d: d["primary_pos"].astype("string"),
+            pos_type=lambda d: d["pos_type"].astype("string"),
         )
     )
 
@@ -324,7 +346,7 @@ def add_overall_pick_features(
     )
 
     # Step to incorporate player country of origin into the dataset
-    origin_df = _fetch_player_origin(out["mlbam_id"])
+    origin_df = _fetch_player_origin_and_position(out["mlbam_id"])
 
     out = (
         out

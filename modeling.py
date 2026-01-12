@@ -143,14 +143,106 @@ def calculate_productivity_score(
     df[f'productivity_{long_window}yr'] = df.groupby('IDfg')[output_col].transform(
         lambda x: x.rolling(window=long_window, min_periods=1).mean()
     )
-    
-    # Drop the temporary age_squared column
-    df = df.drop(columns=['age_squared'])
 
     # Fill NaN values in trend with 0 (no change for first season)
     df['productivity_trend'] = df['productivity_trend'].fillna(0)
     
     return df
+
+# Adding per-year features to normalize aggregated counting stats to a per-year basis
+def add_per_year_features(
+    df: pd.DataFrame,
+    *,
+    agg_years: int,
+    sum_cols: list[str],
+    coverage_prefix: str = "years_covered_prior",
+) -> pd.DataFrame:
+    out = df.copy()
+    w = agg_years
+
+    coverage_col = f"{coverage_prefix}{w}"
+
+    for c in sum_cols:
+        agg_col = f"{c}_prior{w}"
+        if agg_col in out.columns and coverage_col in out.columns:
+            out[f"{c}_per_year_prior{w}"] = (
+                out[agg_col] / out[coverage_col].replace(0, pd.NA)
+            )
+
+    return out
+
+# Function to add "years since peak" feature to dataset
+def calculate_years_since_peak(
+    df: pd.DataFrame,
+    player_col="IDfg",
+    year_col="Season",
+    value_col="fantasy_points",
+    output_col="years_since_peak",
+) -> pd.DataFrame:
+    """
+    Adds a column indicating how many years it has been since each player's peak season (by value_col).
+    The peak is defined as the season with the maximum value_col for each player.
+    """
+    df = df.copy()
+    # Find the peak year for each player
+    peak_years = df.groupby(player_col)[[value_col, year_col]].apply(
+        lambda g: g.loc[g[value_col].idxmax(), year_col]
+    )
+    # Map peak year to each row
+    df["peak_year"] = df[player_col].map(peak_years)
+    # Calculate years since peak
+    df[output_col] = df[year_col] - df["peak_year"]
+    # If future seasons, years_since_peak will be negative; set to 0 for peak year, positive for after, negative for before
+    return df.drop(columns=["peak_year"])
+
+# Function to add player tier based on recent WAR per season performance
+def add_player_tier(
+    df: pd.DataFrame,
+    *,
+    agg_years: int,
+    war_col: str = "WAR",
+    coverage_prefix: str = "years_covered_prior",
+    tier_col: str = "player_tier_recent",
+) -> pd.DataFrame:
+    """
+    Adds a categorical player tier based on WAR per season
+    over the most recent prior window (agg_years).
+    """
+    out = df.copy()
+
+    w = agg_years
+    war_sum_col = f"{war_col}_prior{w}"
+    coverage_col = f"{coverage_prefix}{w}"
+
+    if war_sum_col not in out.columns or coverage_col not in out.columns:
+        raise ValueError(f"Missing required columns: {war_sum_col}, {coverage_col}")
+
+    out["war_per_year_recent"] = np.where(
+        out[coverage_col] > 0,
+        out[war_sum_col] / out[coverage_col],
+        0.0,
+    )
+
+    out[tier_col] = pd.cut(
+        out["war_per_year_recent"],
+        bins=[-np.inf, 1.0, 2.0, 4.0, np.inf],
+        labels=["replacement", "avg", "above_avg", "star"],
+    ).astype("category")
+
+    return out.drop(columns=["war_per_year_recent"])
+
+# Determines the pitcher role based on games started and innings pitched
+def add_pitcher_role_flags(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+
+    out["starter_rate"] = np.where(out["G"] > 0, out["GS"] / out["G"], 0.0)
+    out["ip_per_game"] = np.where(out["G"] > 0, out["IP"] / out["G"], 0.0)
+
+    # Defining starter vs reliever based on starter rate
+    out["is_starter"] = (out["starter_rate"] >= 0.5).astype(int)
+    out["is_reliever"] = (out["starter_rate"] < 0.5).astype(int)
+
+    return out
 
 def scale_numeric_columns(dfs: list, target_variable: str) -> list:
     """
