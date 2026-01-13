@@ -74,80 +74,68 @@ def calculate_delta(
 
 def calculate_productivity_score(
     df: pd.DataFrame,
-    fantasy_points_col: str = 'fantasy_points',
-    age_col: str = 'Age',
-    output_col: str = 'productivity_score',
-    agg_years: int = 2
+    fantasy_points_col: str = "fantasy_points",
+    age_col: str = "Age",
+    output_col: str = "productivity_score",
+    agg_years: int = 3,
 ) -> pd.DataFrame:
-    """
-    Calculate productivity score features based on player age and fantasy points.
-    
-    Creates five productivity metrics:
-    1. Adjusted productivity: fantasy_points / (age^2)
-    2. Productivity trend: change from previous season
-    3. Short-term rolling average: agg_years rolling average productivity
-    4. Long-term rolling average: 2 * agg_years rolling average productivity
-    
-    This helps identify players performing above/below their career arc.
-    
-    Parameters
-    ----------
-    df : pd.DataFrame
-        Input dataframe containing player season data.
-    fantasy_points_col : str, default 'fantasy_points'
-        Column name containing fantasy points.
-    age_col : str, default 'Age'
-        Column name containing player age.
-    output_col : str, default 'productivity_score'
-        Base name for output columns (suffixes added for trend and rolling windows).
-    agg_years : int, default 2
-        Number of years for the short-term rolling window. 
-        Long-term window will be 2 * agg_years.
-    
-    Returns
-    -------
-    pd.DataFrame
-        Input dataframe with five new columns:
-        - 'productivity_score': fantasy_points / (age^2)
-        - 'productivity_trend': change from previous season
-        - 'productivity_{agg_years}yr': rolling average over agg_years
-        - 'productivity_{2*agg_years}yr': rolling average over 2*agg_years
-    
-    Notes
-    -----
-    Productivity score higher values indicate better efficiency relative to age.
-    Trend can be positive (improving) or negative (declining).
-    """
     df = df.copy()
 
-    # Sort by player and season to ensure correct grouped operations
-    df = df.sort_values(by=['IDfg', 'Season']).reset_index(drop=True)
-    
-    # Calculate age squared
-    df['age_squared'] = df[age_col] ** 2
-    
-    # Create adjusted productivity score (points / age^2)
-    df[output_col] = df[fantasy_points_col] / df['age_squared']
-    
-    # Calculate productivity trend (change from previous season)
-    df['productivity_trend'] = df.groupby('IDfg')[output_col].diff()
-    
-    # Calculate short-term rolling average productivity
-    short_window = agg_years
-    df[f'productivity_{short_window}yr'] = df.groupby('IDfg')[output_col].transform(
-        lambda x: x.rolling(window=short_window, min_periods=1).mean()
-    )
-    
-    # Calculate long-term rolling average productivity
-    long_window = agg_years * 2
-    df[f'productivity_{long_window}yr'] = df.groupby('IDfg')[output_col].transform(
-        lambda x: x.rolling(window=long_window, min_periods=1).mean()
+    # Ensure sorting
+    df = df.sort_values(["IDfg", "Season"]).reset_index(drop=True)
+
+    # Base productivity
+    df["age_squared"] = df[age_col] ** 2
+    df[output_col] = df[fantasy_points_col] / df["age_squared"]
+
+    short_w = agg_years
+    long_w = agg_years * 2
+    # Season-aware rolling function, catching missing seasons (due to injury/relegation/suspension/inactivity)
+    def _season_aware(g: pd.DataFrame) -> pd.DataFrame:
+        g = g.sort_values("Season").copy()
+
+        # Build a complete season index for this player
+        full_seasons = pd.Index(
+            range(int(g["Season"].min()), int(g["Season"].max()) + 1),
+            name="Season",
+        )
+
+        # Reindex to full seasons so missing years are explicit (NaN)
+        s = (
+            g.set_index("Season")[output_col]
+            .reindex(full_seasons)
+            .astype(float)
+        )
+
+        # Rolling means (missing seasons ignored in mean)
+        roll_short = s.rolling(window=short_w, min_periods=1).mean()
+        roll_long  = s.rolling(window=long_w,  min_periods=1).mean()
+
+        # Coverage counts = number of non-null seasons in the window
+        cov_short = s.notna().rolling(window=short_w, min_periods=1).sum()
+        cov_long  = s.notna().rolling(window=long_w,  min_periods=1).sum()
+
+        # Trend should be season-to-season; missing season yields NaN trend (filled later if desired)
+        trend = s.diff()
+
+        # Map back to original seasons
+        g[f"productivity_{short_w}yr"] = g["Season"].map(roll_short)
+        g[f"productivity_{long_w}yr"] = g["Season"].map(roll_long)
+
+        g[f"productivity_covered_{short_w}yr"] = g["Season"].map(cov_short).astype("Int64")
+        g[f"productivity_covered_{long_w}yr"]  = g["Season"].map(cov_long).astype("Int64")
+
+        g["productivity_trend"] = g["Season"].map(trend)
+
+        return g
+
+    df = (
+        df.groupby("IDfg", group_keys=False)
+          .apply(_season_aware)
+          .reset_index(drop=True)
     )
 
-    # Fill NaN values in trend with 0 (no change for first season)
-    df['productivity_trend'] = df['productivity_trend'].fillna(0)
-    
-    return df
+    return df.drop(columns=["age_squared"])
 
 # Adding per-year features to normalize aggregated counting stats to a per-year basis
 def add_per_year_features(
