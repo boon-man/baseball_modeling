@@ -6,6 +6,7 @@ from xgboost import XGBRegressor
 from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_error
 from hyperopt import fmin, tpe, Trials, STATUS_OK
 from IPython.display import display
+import warnings
 
 def calculate_delta(
     df: pd.DataFrame,
@@ -56,7 +57,7 @@ def calculate_delta(
     avg_fantasy_points = df[agg_fantasy_points_col] / agg_years
     df[output_col] = df[fantasy_points_col] - avg_fantasy_points
     
-    # Calculate deltas for career columns if provided
+    # Calculate deltas for aggregate columns if provided
     if core_cols:
         for col in core_cols:
             if col == 'IDfg':
@@ -94,46 +95,65 @@ def calculate_productivity_score(
     def _season_aware(g: pd.DataFrame) -> pd.DataFrame:
         g = g.sort_values("Season").copy()
 
-        # Build a complete season index for this player
         full_seasons = pd.Index(
             range(int(g["Season"].min()), int(g["Season"].max()) + 1),
             name="Season",
         )
 
-        # Reindex to full seasons so missing years are explicit (NaN)
         s = (
             g.set_index("Season")[output_col]
             .reindex(full_seasons)
             .astype(float)
         )
 
+        played = s.notna()
+
+        # missed_prev_season: whether previous season was missed
+        prev_played = played.shift(1).fillna(True).astype(bool)   
+        missed_prev = (~prev_played).astype("Int64")
+
+        # years_since_last_season: gap since previous played season (consecutive years -> 1)
+        played_years = pd.Series(full_seasons, index=full_seasons).where(played)
+        prev_played_year = played_years.ffill().shift(1)
+        years_since_last = (pd.Series(full_seasons, index=full_seasons) - prev_played_year).astype("Float64")
+
+        # map back to observed seasons
+        g["missed_prev_season"] = g["Season"].map(missed_prev).fillna(0).astype("int8")
+        g["years_since_last_season"] = g["Season"].map(years_since_last).fillna(0).astype("int16")
+
         # Rolling means (missing seasons ignored in mean)
         roll_short = s.rolling(window=short_w, min_periods=1).mean()
-        roll_long  = s.rolling(window=long_w,  min_periods=1).mean()
+        roll_long = s.rolling(window=long_w, min_periods=1).mean()
 
-        # Coverage counts = number of non-null seasons in the window
-        cov_short = s.notna().rolling(window=short_w, min_periods=1).sum()
-        cov_long  = s.notna().rolling(window=long_w,  min_periods=1).sum()
+        cov_short = played.rolling(window=short_w, min_periods=1).sum()
+        cov_long = played.rolling(window=long_w, min_periods=1).sum()
 
-        # Trend should be season-to-season; missing season yields NaN trend (filled later if desired)
         trend = s.diff()
 
-        # Map back to original seasons
         g[f"productivity_{short_w}yr"] = g["Season"].map(roll_short)
         g[f"productivity_{long_w}yr"] = g["Season"].map(roll_long)
 
         g[f"productivity_covered_{short_w}yr"] = g["Season"].map(cov_short).astype("Int64")
-        g[f"productivity_covered_{long_w}yr"]  = g["Season"].map(cov_long).astype("Int64")
+        g[f"productivity_covered_{long_w}yr"] = g["Season"].map(cov_long).astype("Int64")
 
         g["productivity_trend"] = g["Season"].map(trend)
 
+        g["recent_weight"] = (
+            g[f"productivity_covered_{short_w}yr"]
+            / g[f"productivity_covered_{long_w}yr"].replace({0: pd.NA})
+        )
+
         return g
 
-    df = (
-        df.groupby("IDfg", group_keys=False)
-          .apply(_season_aware)
-          .reset_index(drop=True)
-    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", category=FutureWarning)
+        warnings.simplefilter("ignore", category=UserWarning)
+
+        df = (
+            df.groupby("IDfg", group_keys=False)
+            .apply(_season_aware)
+            .reset_index(drop=True)
+        )
 
     return df.drop(columns=["age_squared"])
 
@@ -156,6 +176,82 @@ def add_per_year_features(
             out[f"{c}_per_year_prior{w}"] = (
                 out[agg_col] / out[coverage_col].replace(0, pd.NA)
             )
+
+    return out
+
+def calculate_growths(
+    df: pd.DataFrame,
+    agg_years: int,
+    *,
+    add_recent: bool = True,
+) -> pd.DataFrame:
+    """
+    Add growth / trend features for workload-style statistics.
+
+    Growth types added:
+    1) Prior-window growth:
+       per_year_prior{agg_years} - per_year_prior{2 * agg_years}
+
+    2) Recent-vs-baseline growth (optional):
+       current_season_value - per_year_prior{agg_years}
+
+    The function is schema-aware and only creates columns when
+    the required inputs exist in the dataframe.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Batting or pitching dataframe.
+    agg_years : int
+        Base aggregation window (e.g. 3).
+    add_recent : bool, default True
+        Whether to add recent-vs-baseline growth features.
+
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame with growth features added.
+    """
+    out = df.copy()
+    w = agg_years
+    w2 = agg_years * 2
+
+    # --- PRIOR vs PRIOR growths (per-year pace changes) ---
+    prior_growth_specs = {
+        # Batters
+        "AB": "AB",
+        "G": "G",
+
+        # Pitchers
+        "IP": "IP",
+        "GS": "GS",
+    }
+
+    for stat, base in prior_growth_specs.items():
+        c1 = f"{base}_per_year_prior{w}"
+        c2 = f"{base}_per_year_prior{w2}"
+
+        if c1 in out.columns and c2 in out.columns:
+            out[f"{base}_growth"] = out[c1] - out[c2]
+
+    # --- RECENT vs BASELINE growths (role / workload jumps) ---
+    if add_recent:
+        recent_growth_specs = {
+            # Batters
+            "AB": "AB",
+            "G": "G",
+
+            # Pitchers
+            "IP": "IP",
+            "GS": "GS",
+        }
+
+        for stat, base in recent_growth_specs.items():
+            cur = base
+            prior = f"{base}_per_year_prior{w}"
+
+            if cur in out.columns and prior in out.columns:
+                out[f"{base}_growth_recent"] = out[cur] - out[prior]
 
     return out
 

@@ -534,8 +534,8 @@ def pull_data(
     agg_years: int,
     batting_stat_cols: list,
     pitching_stat_cols: list,
-    batting_career_cols: list,
-    pitching_career_cols: list,
+    batting_agg_cols: list,
+    pitching_agg_cols: list,
     career_window_years: int = 10,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """
@@ -558,10 +558,10 @@ def pull_data(
         List of columns to include for batting features.
     pitching_stat_cols : list of str
         List of columns to include for pitching features.
-    batting_career_cols : list of str
-        List of columns to include for batting career aggregates.
-    pitching_career_cols : list of str
-        List of columns to include for pitching career aggregates.
+    batting_agg_cols : list of str
+        List of columns to include for batting aggregates.
+    pitching_agg_cols : list of str
+        List of columns to include for pitching aggregates.
     include_future_target : bool
         Whether to include future season fantasy points as target variable.
     career_window_years : int, default 10
@@ -650,15 +650,20 @@ def pull_data(
         # "Career" stats (last 10 years, Fangraphs does not allow more than 10 years in a pull)
         career_batting = pull_agg_stats(
             stats_fn=batting_stats,
-            stat_cols=batting_career_cols,
+            stat_cols=["IDfg", "REW", "wOBA", "wRC+", "OPS", "ISO"], # limiting to key rate stats for batting career
             mode="prior",
             year=year,
             window=career_window_years,
             qual=1,
             suffix="_career",
-            fantasy_fn=calc_fantasy_points_batting,
-            fantasy_col="fantasy_points_career",
+            fantasy_fn=None,
+            fantasy_col=None,
         )
+        # Calculate REW per year and dropping raw REW career total
+        career_batting["REW_career_per_year"] = (
+            career_batting["REW_career"] / career_window_years
+        )
+        career_batting = career_batting.drop(columns=["REW_career"])
 
         # Combine batting
         batting_year = (
@@ -723,15 +728,20 @@ def pull_data(
         # "Career" stats (last 10 years, Fangraphs does not allow more than 10 years in a pull)
         career_pitching = pull_agg_stats(
             stats_fn=pitching_stats,
-            stat_cols=pitching_career_cols,
+            stat_cols=["IDfg", "REW", "WPA", "FIP", "K-BB%", "SIERA"], # limiting to key rate stats for pitching career
             mode="prior",
             year=year,
             window=career_window_years,
             qual=1,
             suffix="_career",
-            fantasy_fn=calc_fantasy_points_pitching,
-            fantasy_col="fantasy_points_career",
+            fantasy_fn=None,
+            fantasy_col=None,
         )
+        # Calculate REW per year and dropping raw REW career total
+        career_pitching["REW_career_per_year"] = (
+            career_pitching["REW_career"] / career_window_years
+        )
+        career_pitching = career_pitching.drop(columns=["REW_career"])
 
         # Combine pitching
         pitching_year = (
@@ -801,55 +811,3 @@ def pull_data(
 
     print("Data pull complete.")
     return batting_df, pitching_df
-
-
-# -------------------------
-# Wrappers for pulling training & testing data
-# -------------------------
-def pull_training_data(
-    start_year: int,
-    end_year: int,  # last feature year (e.g., 2024)
-    agg_years: int,
-    batting_stat_cols: list,
-    pitching_stat_cols: list,
-    batting_career_cols: list,
-    pitching_career_cols: list,
-    career_window_years: int = 10,
-) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """
-    Pull training data with future-season targets included.
-    """
-    return pull_data(
-        start_year=start_year,
-        end_year=end_year,
-        agg_years=agg_years,
-        batting_stat_cols=batting_stat_cols,
-        pitching_stat_cols=pitching_stat_cols,
-        batting_career_cols=batting_career_cols,
-        pitching_career_cols=pitching_career_cols,
-        career_window_years=career_window_years,
-    )
-
-
-def pull_prediction_data(
-    year: int,
-    agg_years: int,
-    batting_stat_cols: list,
-    pitching_stat_cols: list,
-    batting_career_cols: list,
-    pitching_career_cols: list,
-    career_window_years: int = 10,
-) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """
-    Pull a scoring/prediction dataset (features only; no future target pull).
-    """
-    return pull_data(
-        start_year=year,
-        end_year=year,
-        agg_years=agg_years,
-        batting_stat_cols=batting_stat_cols,
-        pitching_stat_cols=pitching_stat_cols,
-        batting_career_cols=batting_career_cols,
-        pitching_career_cols=pitching_career_cols,
-        career_window_years=career_window_years,
-    )
