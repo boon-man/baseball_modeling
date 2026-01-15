@@ -82,15 +82,31 @@ def pull_projections(url: str):
 def cast_feature_dtypes(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
 
-    # This one is fine as category (comes from pd.cut labels)
+    # Certifying categorical dtypes
     if "overall_pick_bucket" in out.columns:
         out["overall_pick_bucket"] = out["overall_pick_bucket"].astype("category")
+    if "era" in out.columns:
+        out["era"] = out["era"].astype("category")
+    if "primary_pos" in out.columns:
+        out["primary_pos"] = (
+            out["primary_pos"]
+            .astype("object")
+            .fillna("Unknown")
+            .astype("category")
+        )
+    if "pos_type" in out.columns:
+        out["pos_type"] = (
+            out["pos_type"]
+            .astype("object")
+            .fillna("Unknown")
+            .astype("category")
+        )
 
     # Convert to python object first, THEN to category (avoids string[python] categories)
     if "birth_country" in out.columns:
         out["birth_country"] = (
             out["birth_country"]
-            .astype("object")          # <--- important
+            .astype("object")
             .fillna("Unknown")
             .astype("category")
         )
@@ -102,7 +118,7 @@ def fillna_numeric_only(df: pd.DataFrame, value: float = 0) -> pd.DataFrame:
     num_cols = df.select_dtypes(include=["number"]).columns
     return df.assign(**{c: df[c].fillna(value) for c in num_cols})
 
-def _fetch_player_origin(mlbam_ids: pd.Series) -> pd.DataFrame:
+def _fetch_player_origin_and_position(mlbam_ids: pd.Series) -> pd.DataFrame:
     ids = (
         mlbam_ids
         .dropna()
@@ -116,12 +132,19 @@ def _fetch_player_origin(mlbam_ids: pd.Series) -> pd.DataFrame:
 
     for i in range(0, len(ids), 50):
         chunk = ids[i:i+50]
-        r = requests.get(url, params={"personIds": ",".join(map(str, chunk))}, timeout=30)
+        r = requests.get(
+            url,
+            params={"personIds": ",".join(map(str, chunk))},
+            timeout=30,
+        )
         r.raise_for_status()
 
         for p in r.json().get("people", []):
+            pos = p.get("primaryPosition") or {}
             rows.append({
                 "mlbam_id": p.get("id"),
+                "primary_pos": pos.get("code"),        # e.g. "P", "OF", "1B"
+                "pos_type": pos.get("type"),           # "Pitcher" or "Player"
                 "birth_country": p.get("birthCountry"),
             })
 
@@ -129,9 +152,59 @@ def _fetch_player_origin(mlbam_ids: pd.Series) -> pd.DataFrame:
         pd.DataFrame(rows)
         .assign(
             mlbam_id=lambda d: pd.to_numeric(d["mlbam_id"], errors="coerce").astype("Int64"),
-            birth_country=lambda d: d["birth_country"].astype("string"),
+            primary_pos=lambda d: d["primary_pos"].astype("string"),
+            pos_type=lambda d: d["pos_type"].astype("string"),
         )
     )
+
+# Function to add era buckets based on season
+def add_era_bucket(df):
+    return df.assign(
+        era=lambda d: pd.cut(
+            d["Season"],
+            bins=[1999, 2004, 2009, 2014, 2019, 2024, 2030],
+            labels=[
+                "early_2000s",
+                "mid_2000s",
+                "early_2010s",
+                "mid_2010s",
+                "late_2010s",
+                "2020s",
+            ],
+        )
+    )
+
+# Function to create a feature that will denote player years available in aggregate season pulls (e.g., player only has 3 years of data but agg_years=5)
+def add_history_coverage(
+    df: pd.DataFrame,
+    *,
+    agg_years: int,
+    years_in_league_col: str = "years_in_league",
+    prefix: str = "years_covered_prior",
+) -> pd.DataFrame:
+    """
+    Adds:
+      - years_covered_prior{agg_years}
+      - years_covered_prior{agg_years*2}
+
+    Coverage = min(years_in_league + 1, window)
+    """
+    w1 = agg_years
+    w2 = agg_years * 2
+
+    out = (
+        df
+        .assign(
+            seasons_available=lambda d: pd.to_numeric(d[years_in_league_col], errors="coerce").fillna(0) + 1,
+            **{
+                f"{prefix}{w1}": lambda d, w=w1: d["seasons_available"].clip(upper=w).astype("Int64"),
+                f"{prefix}{w2}": lambda d, w=w2: d["seasons_available"].clip(upper=w).astype("Int64"),
+            },
+        )
+        .drop(columns=["seasons_available"])
+    )
+
+    return out
 
 def _fetch_draft_year(year: int) -> pd.DataFrame:
     """
@@ -273,7 +346,7 @@ def add_overall_pick_features(
     )
 
     # Step to incorporate player country of origin into the dataset
-    origin_df = _fetch_player_origin(out["mlbam_id"])
+    origin_df = _fetch_player_origin_and_position(out["mlbam_id"])
 
     out = (
         out
@@ -461,8 +534,8 @@ def pull_data(
     agg_years: int,
     batting_stat_cols: list,
     pitching_stat_cols: list,
-    batting_career_cols: list,
-    pitching_career_cols: list,
+    batting_agg_cols: list,
+    pitching_agg_cols: list,
     career_window_years: int = 10,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """
@@ -485,10 +558,10 @@ def pull_data(
         List of columns to include for batting features.
     pitching_stat_cols : list of str
         List of columns to include for pitching features.
-    batting_career_cols : list of str
-        List of columns to include for batting career aggregates.
-    pitching_career_cols : list of str
-        List of columns to include for pitching career aggregates.
+    batting_agg_cols : list of str
+        List of columns to include for batting aggregates.
+    pitching_agg_cols : list of str
+        List of columns to include for pitching aggregates.
     include_future_target : bool
         Whether to include future season fantasy points as target variable.
     career_window_years : int, default 10
@@ -577,15 +650,20 @@ def pull_data(
         # "Career" stats (last 10 years, Fangraphs does not allow more than 10 years in a pull)
         career_batting = pull_agg_stats(
             stats_fn=batting_stats,
-            stat_cols=batting_career_cols,
+            stat_cols=["IDfg", "REW", "wOBA", "wRC+", "OPS", "ISO"], # limiting to key rate stats for batting career
             mode="prior",
             year=year,
             window=career_window_years,
             qual=1,
             suffix="_career",
-            fantasy_fn=calc_fantasy_points_batting,
-            fantasy_col="fantasy_points_career",
+            fantasy_fn=None,
+            fantasy_col=None,
         )
+        # Calculate REW per year and dropping raw REW career total
+        career_batting["REW_career_per_year"] = (
+            career_batting["REW_career"] / career_window_years
+        )
+        career_batting = career_batting.drop(columns=["REW_career"])
 
         # Combine batting
         batting_year = (
@@ -650,15 +728,20 @@ def pull_data(
         # "Career" stats (last 10 years, Fangraphs does not allow more than 10 years in a pull)
         career_pitching = pull_agg_stats(
             stats_fn=pitching_stats,
-            stat_cols=pitching_career_cols,
+            stat_cols=["IDfg", "REW", "WPA", "FIP", "K-BB%", "SIERA"], # limiting to key rate stats for pitching career
             mode="prior",
             year=year,
             window=career_window_years,
             qual=1,
             suffix="_career",
-            fantasy_fn=calc_fantasy_points_pitching,
-            fantasy_col="fantasy_points_career",
+            fantasy_fn=None,
+            fantasy_col=None,
         )
+        # Calculate REW per year and dropping raw REW career total
+        career_pitching["REW_career_per_year"] = (
+            career_pitching["REW_career"] / career_window_years
+        )
+        career_pitching = career_pitching.drop(columns=["REW_career"])
 
         # Combine pitching
         pitching_year = (
@@ -716,8 +799,8 @@ def pull_data(
         .drop(columns=["mlbam_id"], errors="ignore")
     )
 
-    batting_df = fillna_numeric_only(batting_df, value=0)
-    pitching_df = fillna_numeric_only(pitching_df, value=0)
+    # batting_df = fillna_numeric_only(batting_df, value=0)
+    # pitching_df = fillna_numeric_only(pitching_df, value=0)
 
     save_data(
             dataframes=[batting_df, pitching_df],
@@ -728,161 +811,3 @@ def pull_data(
 
     print("Data pull complete.")
     return batting_df, pitching_df
-
-
-# -------------------------
-# Wrappers for pulling training & testing data
-# -------------------------
-def pull_training_data(
-    start_year: int,
-    end_year: int,  # last feature year (e.g., 2024)
-    agg_years: int,
-    batting_stat_cols: list,
-    pitching_stat_cols: list,
-    batting_career_cols: list,
-    pitching_career_cols: list,
-    career_window_years: int = 10,
-) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """
-    Pull training data with future-season targets included.
-    """
-    return pull_data(
-        start_year=start_year,
-        end_year=end_year,
-        agg_years=agg_years,
-        batting_stat_cols=batting_stat_cols,
-        pitching_stat_cols=pitching_stat_cols,
-        batting_career_cols=batting_career_cols,
-        pitching_career_cols=pitching_career_cols,
-        career_window_years=career_window_years,
-    )
-
-
-def pull_prediction_data(
-    year: int,
-    agg_years: int,
-    batting_stat_cols: list,
-    pitching_stat_cols: list,
-    batting_career_cols: list,
-    pitching_career_cols: list,
-    career_window_years: int = 10,
-) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """
-    Pull a scoring/prediction dataset (features only; no future target pull).
-    """
-    return pull_data(
-        start_year=year,
-        end_year=year,
-        agg_years=agg_years,
-        batting_stat_cols=batting_stat_cols,
-        pitching_stat_cols=pitching_stat_cols,
-        batting_career_cols=batting_career_cols,
-        pitching_career_cols=pitching_career_cols,
-        career_window_years=career_window_years,
-    )
-
-# def pull_prediction_data(
-#     prediction_year: int,
-#     agg_years: int,
-#     batting_stat_cols: list,
-#     pitching_stat_cols: list,
-# ) -> tuple:
-#     """
-#     Pulls and processes batting and pitching data for the specified years.
-
-#     Parameters:
-#     end_year (int): The end year for the data pull.
-#     agg_years (int): The number of years to aggregate for prior data.
-#     batting_stat_cols (list): List of columns to include in the batting data.
-#     pitching_stat_cols (list): List of columns to include in the pitching data.
-
-#     Returns:
-#     tuple: A tuple containing two DataFrames, one for batting data and one for pitching data.
-#     """
-#     # Initialize empty DataFrames
-#     batting_df = pd.DataFrame()
-#     pitching_df = pd.DataFrame()
-
-#     # Creating start and end years for the aggregated data pull of prior player seasons
-#     end_year_prior = prediction_year - 1
-#     start_year_prior = end_year_prior - agg_years
-
-#     # Pulling batting stats
-#     batting_df_current = batting_stats(
-#         start_season=prediction_year,  # Selecting a single season for most recent stats
-#         qual=50,
-#         split_seasons=True,
-#     ).filter(items=batting_stat_cols)
-#     calc_fantasy_points_batting(batting_df_current, "fantasy_points")
-
-#     batting_df_prior = batting_stats(
-#         start_season=start_year_prior,
-#         end_season=end_year_prior,
-#         qual=50,
-#         split_seasons=False,
-#     ).filter(items=batting_stat_cols)
-#     batting_df_prior = batting_df_prior.drop(
-#         columns=["Name", "Age"]
-#     )  # Dropping redundant columns for joining
-#     calc_fantasy_points_batting(batting_df_prior, "fantasy_points_prior")
-#     batting_df_prior = add_suffix_to_columns(
-#         batting_df_prior, "_prior", exclude_columns=["IDfg", "fantasy_points_prior"]
-#     )
-
-#     # Combining batting features into single dataframe and replace NaN values with 0
-#     batting_df_current = batting_df_current.merge(
-#         batting_df_prior, on="IDfg", how="left"
-#     )
-
-#     # Pulling pitching stats
-#     pitching_df_current = pitching_stats(
-#         start_season=prediction_year,  # Selecting a single season for most recent stats
-#         qual=15,
-#         split_seasons=True,
-#     ).filter(items=pitching_stat_cols)
-#     calc_fantasy_points_pitching(pitching_df_current, "fantasy_points")
-
-#     pitching_df_prior = pitching_stats(
-#         start_season=start_year_prior,
-#         end_season=end_year_prior,
-#         qual=15,
-#         split_seasons=False,
-#     ).filter(items=pitching_stat_cols)
-#     pitching_df_prior = pitching_df_prior.drop(
-#         columns=["Name", "Age"]
-#     )  # Dropping redundant columns for joining
-#     calc_fantasy_points_pitching(pitching_df_prior, "fantasy_points_prior")
-#     pitching_df_prior = add_suffix_to_columns(
-#         pitching_df_prior, "_prior", exclude_columns=["IDfg", "fantasy_points_prior"]
-#     )
-
-#     # Combining pitching features into single dataframe & replace NaN values with 0
-#     pitching_df_current = pitching_df_current.merge(
-#         pitching_df_prior, on="IDfg", how="left"
-#     )
-
-#     # Append the results to the main DataFrames
-#     batting_df = pd.concat([batting_df, batting_df_current], ignore_index=True)
-#     pitching_df = pd.concat([pitching_df, pitching_df_current], ignore_index=True)
-
-#     # Add a column to indicate if the season is during the COVID-19 pandemic
-#     batting_df["covid_season"] = batting_df["Season"] == 2020
-#     pitching_df["covid_season"] = pitching_df["Season"] == 2020
-
-#     # Add a column to indicate if the prior seasons were during the COVID-19 pandemic
-#     batting_df["covid_impact"] = batting_df["Season"].apply(
-#         lambda x: _validate_covid_impact(x, agg_years)
-#     )
-#     pitching_df["covid_impact"] = pitching_df["Season"].apply(
-#         lambda x: _validate_covid_impact(x, agg_years)
-#     )
-
-#     # Add player rookie seasons onto the data, helps with modeling new players vs veterans
-#     batting_df = player_data(batting_df)
-#     pitching_df = player_data(pitching_df)
-
-#     # Replacing NaN values with 0
-#     batting_df.fillna(0, inplace=True)
-#     pitching_df.fillna(0, inplace=True)
-
-#     return batting_df, pitching_df

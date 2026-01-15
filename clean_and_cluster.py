@@ -232,8 +232,10 @@ def calculate_relative_value(
         out["relative_value"].rank(method="dense", ascending=False).astype(int)
     )
 
-    # Cleanup intermediate stats columns if you want
+    # Clean up intermediate columns & sort final output by overall ranking
+    out = out.sort_values("overall_ranking").reset_index(drop=True)
     out = out.drop(columns=["group_mean", "group_std"])
+
 
     return out
 

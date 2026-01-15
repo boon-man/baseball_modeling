@@ -6,6 +6,7 @@ from xgboost import XGBRegressor
 from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_error
 from hyperopt import fmin, tpe, Trials, STATUS_OK
 from IPython.display import display
+import warnings
 
 def calculate_delta(
     df: pd.DataFrame,
@@ -56,7 +57,7 @@ def calculate_delta(
     avg_fantasy_points = df[agg_fantasy_points_col] / agg_years
     df[output_col] = df[fantasy_points_col] - avg_fantasy_points
     
-    # Calculate deltas for career columns if provided
+    # Calculate deltas for aggregate columns if provided
     if core_cols:
         for col in core_cols:
             if col == 'IDfg':
@@ -74,71 +75,258 @@ def calculate_delta(
 
 def calculate_productivity_score(
     df: pd.DataFrame,
-    fantasy_points_col: str = 'fantasy_points',
-    age_col: str = 'Age',
-    output_col: str = 'productivity_score'
+    fantasy_points_col: str = "fantasy_points",
+    age_col: str = "Age",
+    output_col: str = "productivity_score",
+    agg_years: int = 3,
+) -> pd.DataFrame:
+    df = df.copy()
+
+    # Ensure sorting
+    df = df.sort_values(["IDfg", "Season"]).reset_index(drop=True)
+
+    # Base productivity
+    df["age_squared"] = df[age_col] ** 2
+    df[output_col] = df[fantasy_points_col] / df["age_squared"]
+
+    short_w = agg_years
+    long_w = agg_years * 2
+    # Season-aware rolling function, catching missing seasons (due to injury/relegation/suspension/inactivity)
+    def _season_aware(g: pd.DataFrame) -> pd.DataFrame:
+        g = g.sort_values("Season").copy()
+
+        full_seasons = pd.Index(
+            range(int(g["Season"].min()), int(g["Season"].max()) + 1),
+            name="Season",
+        )
+
+        s = (
+            g.set_index("Season")[output_col]
+            .reindex(full_seasons)
+            .astype(float)
+        )
+
+        played = s.notna()
+
+        # missed_prev_season: whether previous season was missed
+        prev_played = played.shift(1).fillna(True).astype(bool)   
+        missed_prev = (~prev_played).astype("Int64")
+
+        # years_since_last_season: gap since previous played season (consecutive years -> 1)
+        played_years = pd.Series(full_seasons, index=full_seasons).where(played)
+        prev_played_year = played_years.ffill().shift(1)
+        years_since_last = (pd.Series(full_seasons, index=full_seasons) - prev_played_year).astype("Float64")
+
+        # map back to observed seasons
+        g["missed_prev_season"] = g["Season"].map(missed_prev).fillna(0).astype("int8")
+        g["years_since_last_season"] = g["Season"].map(years_since_last).fillna(0).astype("int16")
+
+        # Rolling means (missing seasons ignored in mean)
+        roll_short = s.rolling(window=short_w, min_periods=1).mean()
+        roll_long = s.rolling(window=long_w, min_periods=1).mean()
+
+        cov_short = played.rolling(window=short_w, min_periods=1).sum()
+        cov_long = played.rolling(window=long_w, min_periods=1).sum()
+
+        trend = s.diff()
+
+        g[f"productivity_{short_w}yr"] = g["Season"].map(roll_short)
+        g[f"productivity_{long_w}yr"] = g["Season"].map(roll_long)
+
+        g[f"productivity_covered_{short_w}yr"] = g["Season"].map(cov_short).astype("Int64")
+        g[f"productivity_covered_{long_w}yr"] = g["Season"].map(cov_long).astype("Int64")
+
+        g["productivity_trend"] = g["Season"].map(trend)
+
+        g["recent_weight"] = (
+            g[f"productivity_covered_{short_w}yr"]
+            / g[f"productivity_covered_{long_w}yr"].replace({0: pd.NA})
+        )
+
+        return g
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", category=FutureWarning)
+        warnings.simplefilter("ignore", category=UserWarning)
+
+        df = (
+            df.groupby("IDfg", group_keys=False)
+            .apply(_season_aware)
+            .reset_index(drop=True)
+        )
+
+    return df.drop(columns=["age_squared"])
+
+# Adding per-year features to normalize aggregated counting stats to a per-year basis
+def add_per_year_features(
+    df: pd.DataFrame,
+    *,
+    agg_years: int,
+    sum_cols: list[str],
+    coverage_prefix: str = "years_covered_prior",
+) -> pd.DataFrame:
+    out = df.copy()
+    w = agg_years
+
+    coverage_col = f"{coverage_prefix}{w}"
+
+    for c in sum_cols:
+        agg_col = f"{c}_prior{w}"
+        if agg_col in out.columns and coverage_col in out.columns:
+            out[f"{c}_per_year_prior{w}"] = (
+                out[agg_col] / out[coverage_col].replace(0, pd.NA)
+            )
+
+    return out
+
+def calculate_growths(
+    df: pd.DataFrame,
+    agg_years: int,
+    *,
+    add_recent: bool = True,
 ) -> pd.DataFrame:
     """
-    Calculate productivity score features based on player age and fantasy points.
-    
-    Creates three productivity metrics:
-    1. Adjusted productivity: fantasy_points / (age^2)
-    2. Productivity trend: change from previous season
-    3. 3-year rolling average productivity
-    
-    This helps identify players performing above/below their career arc.
-    
+    Add growth / trend features for workload-style statistics.
+
+    Growth types added:
+    1) Prior-window growth:
+       per_year_prior{agg_years} - per_year_prior{2 * agg_years}
+
+    2) Recent-vs-baseline growth (optional):
+       current_season_value - per_year_prior{agg_years}
+
+    The function is schema-aware and only creates columns when
+    the required inputs exist in the dataframe.
+
     Parameters
     ----------
     df : pd.DataFrame
-        Input dataframe containing player season data.
-    fantasy_points_col : str, default 'fantasy_points'
-        Column name containing fantasy points.
-    age_col : str, default 'Age'
-        Column name containing player age.
-    output_col : str, default 'productivity_score'
-        Base name for output columns (suffixes added for trend and 3yr).
-    
+        Batting or pitching dataframe.
+    agg_years : int
+        Base aggregation window (e.g. 3).
+    add_recent : bool, default True
+        Whether to add recent-vs-baseline growth features.
+
     Returns
     -------
     pd.DataFrame
-        Input dataframe with three new columns:
-        - 'productivity_score': fantasy_points / (age^2)
-        - 'productivity_trend': change from previous season
-        - 'productivity_3yr': 3-year rolling average
-    
-    Notes
-    -----
-    Productivity score higher values indicate better efficiency relative to age.
-    Trend can be positive (improving) or negative (declining).
+        DataFrame with growth features added.
+    """
+    out = df.copy()
+    w = agg_years
+    w2 = agg_years * 2
+
+    # --- PRIOR vs PRIOR growths (per-year pace changes) ---
+    prior_growth_specs = {
+        # Batters
+        "AB": "AB",
+        "G": "G",
+
+        # Pitchers
+        "IP": "IP",
+        "GS": "GS",
+    }
+
+    for stat, base in prior_growth_specs.items():
+        c1 = f"{base}_per_year_prior{w}"
+        c2 = f"{base}_per_year_prior{w2}"
+
+        if c1 in out.columns and c2 in out.columns:
+            out[f"{base}_growth"] = out[c1] - out[c2]
+
+    # --- RECENT vs BASELINE growths (role / workload jumps) ---
+    if add_recent:
+        recent_growth_specs = {
+            # Batters
+            "AB": "AB",
+            "G": "G",
+
+            # Pitchers
+            "IP": "IP",
+            "GS": "GS",
+        }
+
+        for stat, base in recent_growth_specs.items():
+            cur = base
+            prior = f"{base}_per_year_prior{w}"
+
+            if cur in out.columns and prior in out.columns:
+                out[f"{base}_growth_recent"] = out[cur] - out[prior]
+
+    return out
+
+# Function to add "years since peak" feature to dataset
+def calculate_years_since_peak(
+    df: pd.DataFrame,
+    player_col="IDfg",
+    year_col="Season",
+    value_col="fantasy_points",
+    output_col="years_since_peak",
+) -> pd.DataFrame:
+    """
+    Adds a column indicating how many years it has been since each player's peak season (by value_col).
+    The peak is defined as the season with the maximum value_col for each player.
     """
     df = df.copy()
-
-    # Sort by player and season to ensure correct grouped operations
-    df = df.sort_values(by=['IDfg', 'Season']).reset_index(drop=True)
-    
-    # Calculate age squared
-    df['age_squared'] = df[age_col] ** 2
-    
-    # Create adjusted productivity score (points / age^2)
-    df[output_col] = df[fantasy_points_col] / df['age_squared']
-    
-    # Calculate productivity trend (change from previous season)
-    # Group by player ID to ensure we're comparing within-player seasons
-    df['productivity_trend'] = df.groupby('IDfg')[output_col].diff()
-    
-    # Calculate 3-year rolling average productivity
-    df['productivity_3yr'] = df.groupby('IDfg')[output_col].transform(
-        lambda x: x.rolling(window=3, min_periods=1).mean()
+    # Find the peak year for each player
+    peak_years = df.groupby(player_col)[[value_col, year_col]].apply(
+        lambda g: g.loc[g[value_col].idxmax(), year_col]
     )
-    
-    # Drop the temporary age_squared column
-    df = df.drop(columns=['age_squared'])
+    # Map peak year to each row
+    df["peak_year"] = df[player_col].map(peak_years)
+    # Calculate years since peak
+    df[output_col] = df[year_col] - df["peak_year"]
+    # If future seasons, years_since_peak will be negative; set to 0 for peak year, positive for after, negative for before
+    return df.drop(columns=["peak_year"])
 
-    # Fill NaN values in trend with 0 (no change for first season)
-    df['productivity_trend'] = df['productivity_trend'].fillna(0)
-    
-    return df
+# Function to add player tier based on recent WAR per season performance
+def add_player_tier(
+    df: pd.DataFrame,
+    *,
+    agg_years: int,
+    war_col: str = "WAR",
+    coverage_prefix: str = "years_covered_prior",
+    tier_col: str = "player_tier_recent",
+) -> pd.DataFrame:
+    """
+    Adds a categorical player tier based on WAR per season
+    over the most recent prior window (agg_years).
+    """
+    out = df.copy()
+
+    w = agg_years
+    war_sum_col = f"{war_col}_prior{w}"
+    coverage_col = f"{coverage_prefix}{w}"
+
+    if war_sum_col not in out.columns or coverage_col not in out.columns:
+        raise ValueError(f"Missing required columns: {war_sum_col}, {coverage_col}")
+
+    out["war_per_year_recent"] = np.where(
+        out[coverage_col] > 0,
+        out[war_sum_col] / out[coverage_col],
+        0.0,
+    )
+
+    out[tier_col] = pd.cut(
+        out["war_per_year_recent"],
+        bins=[-np.inf, 1.0, 2.0, 4.0, np.inf],
+        labels=["replacement", "avg", "above_avg", "star"],
+    ).astype("category")
+
+    return out.drop(columns=["war_per_year_recent"])
+
+# Determines the pitcher role based on games started and innings pitched
+def add_pitcher_role_flags(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+
+    out["starter_rate"] = np.where(out["G"] > 0, out["GS"] / out["G"], 0.0)
+    out["ip_per_game"] = np.where(out["G"] > 0, out["IP"] / out["G"], 0.0)
+
+    # Defining starter vs reliever based on starter rate
+    out["is_starter"] = (out["starter_rate"] >= 0.5).astype(int)
+    out["is_reliever"] = (out["starter_rate"] < 0.5).astype(int)
+
+    return out
 
 def scale_numeric_columns(dfs: list, target_variable: str) -> list:
     """

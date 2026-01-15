@@ -181,7 +181,7 @@ def plot_actual_vs_pred_mlb(
     max_y = df[actual_col].max()
 
     # Overperformers: left / upper region
-    over_x = 0.3 * max_x
+    over_x = 0.2 * max_x
     over_y = 0.8 * max_y
 
     # Underperformers: right / lower region
@@ -210,7 +210,7 @@ def plot_actual_vs_pred_mlb(
         ggplot(df, aes(x=pred_col, y=actual_col))
 
         # Scatter points (primary visual)
-        + geom_point(alpha=0.8, size=2, color=color_palette[0])
+        + geom_point(alpha=0.75, size=1.2, color=color_palette[0])
 
         # Fitted line + confidence interval (lighter blue, de-emphasized)
         + geom_smooth(
@@ -249,7 +249,7 @@ def plot_actual_vs_pred_mlb(
             fontstyle="italic",
         )
 
-        # Region annotations (now dynamic)
+        # Region annotations 
         + annotate(
             "text",
             x=under_x,
@@ -390,7 +390,7 @@ def plot_resid_vs_pred_mlb(
             x="Predicted Fantasy Points",
             y="Prediction Diff (Predicted - Actual)",
         )
-        + geom_point(alpha=0.8, size=1.5, color=color_palette[1])
+        + geom_point(alpha=0.75, size=1.2, color=color_palette[1])
         + geom_hline(yintercept=0, linetype="dashed", color="grey", alpha=0.7)
         + annotate(
             "rect",
@@ -497,7 +497,7 @@ def plot_resid_hist_mlb(
         + geom_histogram(
             binwidth=binwidth,
             fill=color_palette[2],
-            alpha=0.95,
+            alpha=0.8,
             color="white",
         )
         + annotate(
@@ -514,11 +514,11 @@ def plot_resid_hist_mlb(
             x=x_annotate,
             y=y_annotate,
             label=f"{within_pct}% of predictions within +/- {int(band)}",
-            size=12,
+            size=14,
             ha="left",
             va="top",
             color="black",
-            alpha=0.75,
+            alpha=0.7,
         )
         + labs(
             title="Distribution of Prediction Errors",
@@ -609,12 +609,12 @@ def plot_decile_calib(
         + geom_point(
             fill=color_palette[3],
             color=color_palette[3],
-            size=2.4,
+            size=2,
         )
         + geom_line(
             color=color_palette[3],
             alpha=1.0,
-            size=0.9,
+            size=0.75,
         )
         + geom_abline(
             slope=1,
@@ -630,7 +630,7 @@ def plot_decile_calib(
             ha="center",
             color="grey",
             fontweight="bold",
-            size=9,
+            size=10,
             nudge_y=nudge_y,
         )
         + labs(
