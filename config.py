@@ -1,6 +1,9 @@
+# Defining number of seasons to aggregate on historical pulls
+AGG_YEARS = 3
+
 # Defining color palette for visualizations
 MLB_COLOR_PALETTE = [
-    "#0B3D91",  # deep blue
+    "#1E5BA8",  # deep blue
     "#C8102E",  # strong red
     "#FFB81C",  # gold
     "#1F8A70",  # teal/green
@@ -10,9 +13,9 @@ MLB_COLOR_PALETTE = [
 
 # Dampening parameter for MLB positional groups, helpful for re-balancing rankings based on positional ADP demands
 POS_DAMPENING_MAP = {
-    "P": 0.85,    
-    "IF": 0.85,   
-    "OF": 1.25,   
+    "P": 0.95,    
+    "IF": 0.95,   
+    "OF": 1.05,   
 }
 
 # Columns for modeling player performance

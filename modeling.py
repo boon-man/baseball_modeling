@@ -541,15 +541,21 @@ def tune_xgb(
         model = XGBRegressor(
             objective="reg:squarederror",
             learning_rate=float(params["learning_rate"]),
-            max_depth=int(params["max_depth"]),
+
+            # leaf-based tree growth
+            grow_policy="lossguide",
+            max_depth=0,
+            max_leaves=int(params["max_leaves"]),
+
             subsample=float(params["subsample"]),
             colsample_bytree=float(params["colsample_bytree"]),
             min_child_weight=float(params["min_child_weight"]),
             reg_lambda=float(params["reg_lambda"]),
             reg_alpha=float(params["reg_alpha"]),
             gamma=float(params["gamma"]),
+
             enable_categorical=True,
-            n_estimators=2000,
+            n_estimators=5000,
             random_state=random_state,
             n_jobs=-1,
             tree_method="hist",
@@ -590,15 +596,12 @@ def tune_xgb(
         fn=objective, space=space, algo=tpe.suggest, max_evals=evals, trials=trials
     )
 
-    # Map hp.choice back to actual max_depth
-    if max_depth_choices is not None:
-        best["max_depth"] = int(max_depth_choices[best["max_depth"]])
-    else:
-        best["max_depth"] = int(best["max_depth"])
-
     best_params = {
         "learning_rate": float(best["learning_rate"]),
-        "max_depth": int(best["max_depth"]),
+        "max_leaves": int(best["max_leaves"]),
+        "grow_policy": "lossguide",
+        "max_depth": 0,
+
         "subsample": float(best["subsample"]),
         "colsample_bytree": float(best["colsample_bytree"]),
         "min_child_weight": float(best["min_child_weight"]),
@@ -688,12 +691,12 @@ def create_model(
         objective="reg:squarederror",
         **final_params,
         enable_categorical=True,
-        n_estimators=2000,
+        n_estimators=5000,
         random_state=random_state,
         n_jobs=-1,
         tree_method="hist",
         eval_metric="rmse",
-        early_stopping_rounds=50,
+        early_stopping_rounds=100,
     )
 
     model.fit(X_tr, y_train, eval_set=[(X_v, y_val)], verbose=False)
