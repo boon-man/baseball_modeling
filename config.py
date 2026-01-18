@@ -15,7 +15,7 @@ MLB_COLOR_PALETTE = [
 POS_DAMPENING_MAP = {
     "P": 0.95,    
     "IF": 0.95,   
-    "OF": 1.05,   
+    "OF": 1.1,   
 }
 
 # Columns for modeling player performance

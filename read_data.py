@@ -7,8 +7,8 @@ from typing import Callable, Literal, Optional
 import requests
 from bs4 import BeautifulSoup
 
-from modeling import (calculate_productivity_score, add_per_year_features, calculate_growths, calculate_years_since_peak, 
-    add_player_tier, add_pitcher_role_flags)
+from modeling import (calculate_productivity_score, add_efficiency_stats, add_per_year_features, 
+    calculate_growths, calculate_years_since_peak, add_player_tier, add_pitcher_role_flags)
 from helper import (
     calc_fantasy_points_batting,
     calc_fantasy_points_pitching,
@@ -867,6 +867,7 @@ def pull_data(
         .drop(columns=["mlbam_id"], errors="ignore")
         .pipe(_add_deltas, agg_years=AGG_YEARS, core_cols=batting_agg_cols)
         .pipe(calculate_productivity_score, agg_years=AGG_YEARS)
+        .pipe(add_efficiency_stats, agg_years=AGG_YEARS)
         .pipe(calculate_years_since_peak)
         .pipe(add_era_bucket)
         .pipe(add_history_coverage, agg_years=AGG_YEARS)
@@ -883,6 +884,7 @@ def pull_data(
         .drop(columns=["mlbam_id"], errors="ignore")
         .pipe(_add_deltas, agg_years=AGG_YEARS, core_cols=pitching_agg_cols)
         .pipe(calculate_productivity_score, agg_years=AGG_YEARS)
+        .pipe(add_efficiency_stats, agg_years=AGG_YEARS)
         .pipe(calculate_years_since_peak)
         .pipe(add_pitcher_role_flags)
         .pipe(add_era_bucket)

@@ -157,6 +157,59 @@ def calculate_productivity_score(
 
     return df.drop(columns=["age_squared"])
 
+# Calculate efficiency statistics regarding fantasy points per game
+def add_efficiency_stats(
+    df: pd.DataFrame,
+    fantasy_points_col: str = 'fantasy_points',
+    agg_years: int = 3,
+) -> pd.DataFrame:
+    """
+    Calculate efficiency statistics: fantasy points per game for current year and prior windows.
+    
+    Creates fantasy_points_pg, fantasy_points_pg_prior{agg_years}, and fantasy_points_pg_prior{agg_years*2} for batters,
+    and fantasy_points_per_start, fantasy_points_per_start_prior{agg_years}, and fantasy_points_per_start_prior{agg_years*2} for pitchers.
+    
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Input dataframe containing player season data with aggregated columns.
+    fantasy_points_col : str, default 'fantasy_points'
+        Column name containing fantasy points.
+    agg_years : int, default 3
+        Number of years in the base aggregation window.
+    
+    Returns
+    -------
+    pd.DataFrame
+        Input dataframe with new efficiency columns added.
+    """
+    df = df.copy()
+    
+    w1 = agg_years
+    w2 = agg_years * 2
+    
+    # Current year efficiency stats
+    df['fantasy_points_pg'] = df[fantasy_points_col] / df['G'].replace(0, np.nan)
+    df['fantasy_points_pg'] = df['fantasy_points_pg'].fillna(0)
+    
+    # Prior window 1
+    fantasy_col_w1 = f'{fantasy_points_col}_prior{w1}'
+    games_col_w1 = f'G_prior{w1}'
+    
+    if fantasy_col_w1 in df.columns and games_col_w1 in df.columns:
+        df[f'fantasy_points_pg_prior{w1}'] = df[fantasy_col_w1] / df[games_col_w1].replace(0, np.nan)
+        df[f'fantasy_points_pg_prior{w1}'] = df[f'fantasy_points_pg_prior{w1}'].fillna(0)
+    
+    # Prior window 2
+    fantasy_col_w2 = f'{fantasy_points_col}_prior{w2}'
+    games_col_w2 = f'G_prior{w2}'
+    
+    if fantasy_col_w2 in df.columns and games_col_w2 in df.columns:
+        df[f'fantasy_points_pg_prior{w2}'] = df[fantasy_col_w2] / df[games_col_w2].replace(0, np.nan)
+        df[f'fantasy_points_pg_prior{w2}'] = df[f'fantasy_points_pg_prior{w2}'].fillna(0)
+    
+    return df
+
 # Adding per-year features to normalize aggregated counting stats to a per-year basis
 def add_per_year_features(
     df: pd.DataFrame,
