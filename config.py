@@ -13,8 +13,8 @@ MLB_COLOR_PALETTE = [
 
 # Dampening parameter for MLB positional groups, helpful for re-balancing rankings based on positional ADP demands
 POS_DAMPENING_MAP = {
-    "P": 0.95,    
-    "IF": 0.95,   
+    "P": 0.90,    
+    "IF": 0.90,   
     "OF": 1.1,   
 }
 

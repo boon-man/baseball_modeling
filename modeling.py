@@ -597,7 +597,6 @@ def tune_xgb(
 
             # leaf-based tree growth
             grow_policy="lossguide",
-            max_depth=0,
             max_leaves=int(params["max_leaves"]),
 
             subsample=float(params["subsample"]),
@@ -653,7 +652,6 @@ def tune_xgb(
         "learning_rate": float(best["learning_rate"]),
         "max_leaves": int(best["max_leaves"]),
         "grow_policy": "lossguide",
-        "max_depth": 0,
 
         "subsample": float(best["subsample"]),
         "colsample_bytree": float(best["colsample_bytree"]),
