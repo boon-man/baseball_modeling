@@ -157,6 +157,59 @@ def calculate_productivity_score(
 
     return df.drop(columns=["age_squared"])
 
+# Calculate efficiency statistics regarding fantasy points per game
+def add_efficiency_stats(
+    df: pd.DataFrame,
+    fantasy_points_col: str = 'fantasy_points',
+    agg_years: int = 3,
+) -> pd.DataFrame:
+    """
+    Calculate efficiency statistics: fantasy points per game for current year and prior windows.
+    
+    Creates fantasy_points_pg, fantasy_points_pg_prior{agg_years}, and fantasy_points_pg_prior{agg_years*2} for batters,
+    and fantasy_points_per_start, fantasy_points_per_start_prior{agg_years}, and fantasy_points_per_start_prior{agg_years*2} for pitchers.
+    
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Input dataframe containing player season data with aggregated columns.
+    fantasy_points_col : str, default 'fantasy_points'
+        Column name containing fantasy points.
+    agg_years : int, default 3
+        Number of years in the base aggregation window.
+    
+    Returns
+    -------
+    pd.DataFrame
+        Input dataframe with new efficiency columns added.
+    """
+    df = df.copy()
+    
+    w1 = agg_years
+    w2 = agg_years * 2
+    
+    # Current year efficiency stats
+    df['fantasy_points_pg'] = df[fantasy_points_col] / df['G'].replace(0, np.nan)
+    df['fantasy_points_pg'] = df['fantasy_points_pg'].fillna(0)
+    
+    # Prior window 1
+    fantasy_col_w1 = f'{fantasy_points_col}_prior{w1}'
+    games_col_w1 = f'G_prior{w1}'
+    
+    if fantasy_col_w1 in df.columns and games_col_w1 in df.columns:
+        df[f'fantasy_points_pg_prior{w1}'] = df[fantasy_col_w1] / df[games_col_w1].replace(0, np.nan)
+        df[f'fantasy_points_pg_prior{w1}'] = df[f'fantasy_points_pg_prior{w1}'].fillna(0)
+    
+    # Prior window 2
+    fantasy_col_w2 = f'{fantasy_points_col}_prior{w2}'
+    games_col_w2 = f'G_prior{w2}'
+    
+    if fantasy_col_w2 in df.columns and games_col_w2 in df.columns:
+        df[f'fantasy_points_pg_prior{w2}'] = df[fantasy_col_w2] / df[games_col_w2].replace(0, np.nan)
+        df[f'fantasy_points_pg_prior{w2}'] = df[f'fantasy_points_pg_prior{w2}'].fillna(0)
+    
+    return df
+
 # Adding per-year features to normalize aggregated counting stats to a per-year basis
 def add_per_year_features(
     df: pd.DataFrame,
@@ -261,23 +314,92 @@ def calculate_years_since_peak(
     player_col="IDfg",
     year_col="Season",
     value_col="fantasy_points",
-    output_col="years_since_peak",
+    output_before_col="years_before_peak",
+    output_after_col="years_after_peak",
 ) -> pd.DataFrame:
     """
-    Adds a column indicating how many years it has been since each player's peak season (by value_col).
+    Adds columns indicating years before and after each player's peak season.
+    
     The peak is defined as the season with the maximum value_col for each player.
+    
+    - years_before_peak: years until peak (positive for pre-peak seasons, 0 for peak and after)
+    - years_after_peak: years since peak (0 for peak and before, positive for post-peak seasons)
+    - pct_of_peak_year: current season value as percentage of peak season value (0-100+)
+    
+    This separation avoids penalizing young players with negative values and allows
+    the model to learn different patterns for rising vs. declining phases.
+    pct_of_peak_year captures performance relative to career best.
     """
     df = df.copy()
-    # Find the peak year for each player
-    peak_years = df.groupby(player_col)[[value_col, year_col]].apply(
-        lambda g: g.loc[g[value_col].idxmax(), year_col]
-    )
-    # Map peak year to each row
+    
+    # Get the index of the row with max value per player
+    peak_idx = df.groupby(player_col)[value_col].idxmax()
+    
+    # Pull peak year and peak value from those rows
+    peak_years = df.loc[peak_idx, year_col]
+    peak_values = df.loc[peak_idx, value_col]
+    
+    # Map both to every row
     df["peak_year"] = df[player_col].map(peak_years)
-    # Calculate years since peak
-    df[output_col] = df[year_col] - df["peak_year"]
-    # If future seasons, years_since_peak will be negative; set to 0 for peak year, positive for after, negative for before
-    return df.drop(columns=["peak_year"])
+    df["peak_value"] = df[player_col].map(peak_values)
+    
+    # Calculate years relative to peak
+    years_diff = df[year_col] - df["peak_year"]
+    
+    # years_before_peak: positive when before peak, 0 otherwise
+    df[output_before_col] = np.where(years_diff < 0, -years_diff, 0)
+    
+    # years_after_peak: positive when after peak, 0 otherwise
+    df[output_after_col] = np.where(years_diff > 0, years_diff, 0)
+
+    # pct_of_peak_year: current season as % of peak (avoid division by zero)
+    df["pct_of_peak_year"] = np.where(
+        (df["peak_value"].notna()) & (df["peak_value"] > 0),
+        (df[value_col] / df["peak_value"]) * 100,
+        0.0
+    )
+    
+    return df.drop(columns=["peak_year", "peak_value"])
+
+def calculate_fantasy_points_percentile(
+    df: pd.DataFrame,
+    season_col: str = "Season",
+    fantasy_points_col: str = "fantasy_points",
+    output_col: str = "fantasy_points_percentile",
+) -> pd.DataFrame:
+    """
+    Calculate each player's fantasy points percentile within their season cohort.
+    
+    Percentile is computed relative to all other players in the same season,
+    allowing the model to learn how position relative to peers affects future performance.
+    
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Input dataframe with player season data.
+    player_col : str, default "IDfg"
+        Column name for player identifier.
+    season_col : str, default "Season"
+        Column name for season year.
+    fantasy_points_col : str, default "fantasy_points"
+        Column name containing fantasy points.
+    output_col : str, default "fantasy_points_percentile"
+        Name of the output percentile column.
+    
+    Returns
+    -------
+    pd.DataFrame
+        Input dataframe with new percentile column (0-100 scale).
+    """
+    df = df.copy()
+    
+    df[output_col] = (
+        df.groupby(season_col)[fantasy_points_col]
+        .rank(pct=True, method="average")
+        .mul(100)
+    )
+    
+    return df
 
 # Function to add player tier based on recent WAR per season performance
 def add_player_tier(
@@ -541,15 +663,20 @@ def tune_xgb(
         model = XGBRegressor(
             objective="reg:squarederror",
             learning_rate=float(params["learning_rate"]),
-            max_depth=int(params["max_depth"]),
+
+            # leaf-based tree growth
+            grow_policy="lossguide",
+            max_leaves=int(params["max_leaves"]),
+
             subsample=float(params["subsample"]),
             colsample_bytree=float(params["colsample_bytree"]),
             min_child_weight=float(params["min_child_weight"]),
             reg_lambda=float(params["reg_lambda"]),
             reg_alpha=float(params["reg_alpha"]),
             gamma=float(params["gamma"]),
+
             enable_categorical=True,
-            n_estimators=2000,
+            n_estimators=5000,
             random_state=random_state,
             n_jobs=-1,
             tree_method="hist",
@@ -590,15 +717,11 @@ def tune_xgb(
         fn=objective, space=space, algo=tpe.suggest, max_evals=evals, trials=trials
     )
 
-    # Map hp.choice back to actual max_depth
-    if max_depth_choices is not None:
-        best["max_depth"] = int(max_depth_choices[best["max_depth"]])
-    else:
-        best["max_depth"] = int(best["max_depth"])
-
     best_params = {
         "learning_rate": float(best["learning_rate"]),
-        "max_depth": int(best["max_depth"]),
+        "max_leaves": int(best["max_leaves"]),
+        "grow_policy": "lossguide",
+
         "subsample": float(best["subsample"]),
         "colsample_bytree": float(best["colsample_bytree"]),
         "min_child_weight": float(best["min_child_weight"]),
@@ -688,12 +811,12 @@ def create_model(
         objective="reg:squarederror",
         **final_params,
         enable_categorical=True,
-        n_estimators=2000,
+        n_estimators=5000,
         random_state=random_state,
         n_jobs=-1,
         tree_method="hist",
         eval_metric="rmse",
-        early_stopping_rounds=50,
+        early_stopping_rounds=100,
     )
 
     model.fit(X_tr, y_train, eval_set=[(X_v, y_val)], verbose=False)

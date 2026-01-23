@@ -1,18 +1,23 @@
 import pandas as pd
+import numpy as np
 from pybaseball import batting_stats, pitching_stats, playerid_reverse_lookup
+import os
+from pathlib import Path
+from typing import Callable, Literal, Optional
+import requests
+from bs4 import BeautifulSoup
+
+from modeling import (calculate_productivity_score, calculate_fantasy_points_percentile, add_efficiency_stats, 
+    add_per_year_features, calculate_growths, calculate_years_since_peak, add_player_tier, add_pitcher_role_flags)
 from helper import (
     calc_fantasy_points_batting,
     calc_fantasy_points_pitching,
     add_suffix_to_columns,
     save_data,
     split_name,
+    _add_deltas,
 )
-import os
-from pathlib import Path
-from typing import Callable, Literal, Optional, Iterable
-import time
-import requests
-from bs4 import BeautifulSoup
+from config import AGG_YEARS
 
 StatsFn = Callable[..., pd.DataFrame]
 FantasyFn = Callable[[pd.DataFrame, str], pd.DataFrame]
@@ -92,6 +97,7 @@ def cast_feature_dtypes(df: pd.DataFrame) -> pd.DataFrame:
             out["primary_pos"]
             .astype("object")
             .fillna("Unknown")
+            .astype(str) # primary_pos is an integer format, needs to be string first before category conversion for XGB
             .astype("category")
         )
     if "pos_type" in out.columns:
@@ -101,8 +107,6 @@ def cast_feature_dtypes(df: pd.DataFrame) -> pd.DataFrame:
             .fillna("Unknown")
             .astype("category")
         )
-
-    # Convert to python object first, THEN to category (avoids string[python] categories)
     if "birth_country" in out.columns:
         out["birth_country"] = (
             out["birth_country"]
@@ -110,6 +114,13 @@ def cast_feature_dtypes(df: pd.DataFrame) -> pd.DataFrame:
             .fillna("Unknown")
             .astype("category")
         )
+    if "player_tier_recent" in out.columns:
+        out["player_tier_recent"] = (
+        out["player_tier_recent"]
+        .astype("object")
+        .fillna("Unknown")
+        .astype("category")
+    )
 
     return out
 
@@ -159,18 +170,24 @@ def _fetch_player_origin_and_position(mlbam_ids: pd.Series) -> pd.DataFrame:
 
 # Function to add era buckets based on season
 def add_era_bucket(df):
+    s = df["Season"]
     return df.assign(
-        era=lambda d: pd.cut(
-            d["Season"],
-            bins=[1999, 2004, 2009, 2014, 2019, 2024, 2030],
-            labels=[
+        era=np.select(
+            [
+                s < 2005,
+                s < 2010,
+                s < 2015,
+                s < 2020,
+                s < 2030,
+            ],
+            [
                 "early_2000s",
                 "mid_2000s",
                 "early_2010s",
                 "mid_2010s",
-                "late_2010s",
                 "2020s",
             ],
+            default="other",
         )
     )
 
@@ -291,6 +308,56 @@ def build_or_update_draft_cache(
 
     return cached
 
+def patch_missing_mlbam_ids(
+    df: pd.DataFrame,
+    name_col: str = "Name",
+    idfg_col: str = "IDfg",
+    mlbam_col: str = "mlbam_id",
+    timeout: int = 30,
+) -> pd.DataFrame:
+    out = df.copy()
+
+    missing = out[mlbam_col].isna()
+    if not missing.any():
+        return out
+
+    # One lookup per unique name among missing IDs
+    names = (
+        out.loc[missing, name_col]
+        .dropna()
+        .drop_duplicates()
+        .tolist()
+    )
+
+    rows = []
+    for nm in names:
+        r = requests.get(
+            "https://statsapi.mlb.com/api/v1/people/search",
+            params={"search": nm},
+            timeout=timeout,
+        )
+        r.raise_for_status()
+        people = r.json().get("people", [])
+
+        # pick best match; simplest: exact match on fullName
+        match = next((p for p in people if (p.get("fullName") or "").lower() == nm.lower()), None)
+        if match is None and people:
+            match = people[0]  # fallback
+
+        if match:
+            rows.append({"Name": nm, "mlbam_id_patch": match.get("id")})
+
+    patch = (
+        pd.DataFrame(rows)
+        .assign(mlbam_id_patch=lambda d: pd.to_numeric(d["mlbam_id_patch"], errors="coerce").astype("Int64"))
+    )
+
+    out = out.merge(patch, on="Name", how="left")
+    out[mlbam_col] = out[mlbam_col].fillna(out["mlbam_id_patch"])
+    out = out.drop(columns=["mlbam_id_patch"])
+
+    return out
+
 
 def add_overall_pick_features(
     df: pd.DataFrame,
@@ -307,6 +374,16 @@ def add_overall_pick_features(
         cache_path=cache_path,
     )
 
+    # Ensuring data types are assigned correctly before merging
+    df = df.assign(
+        mlbam_id=pd.to_numeric(df["mlbam_id"], errors="coerce").astype("Int64")
+    )
+    draft_cache = draft_cache.assign(
+        mlbam_id=pd.to_numeric(draft_cache["mlbam_id"], errors="coerce").astype("Int64"),
+        overall_pick_number=pd.to_numeric(draft_cache["overall_pick_number"], errors="coerce").astype("Int64"),
+        draft_year=pd.to_numeric(draft_cache["draft_year"], errors="coerce").astype("Int64"),
+    )
+
     # Reduce to 1 row per player (earliest draft year, keep that pick)
     draft_one = (
         draft_cache
@@ -318,10 +395,6 @@ def add_overall_pick_features(
             columns={
                 "draft_year": "draft_year",
                 "overall_pick_number": "draft_overall_pick",
-                "pick_round": "draft_round",
-                "round_pick_number": "draft_round_pick",
-                "team_id": "draft_team_id",
-                "team_name": "draft_team_name",
             }
         )
         .filter(items=[
@@ -363,6 +436,7 @@ def add_overall_pick_features(
             ).astype(int),
         )
     )
+    
     return out
 
 def _player_history_lookup(df: pd.DataFrame) -> pd.DataFrame:
@@ -783,24 +857,44 @@ def pull_data(
     )
 
     # -------------------------
-    # Player metadata + cleanup
+    # Player metadata and draft info additions & final feature engineering
     # -------------------------
     batting_df = (
         batting_df
         .pipe(_player_history_lookup)
+        .pipe(patch_missing_mlbam_ids)
         .pipe(add_overall_pick_features)
         .drop(columns=["mlbam_id"], errors="ignore")
+        .pipe(_add_deltas, agg_years=AGG_YEARS, core_cols=batting_agg_cols)
+        .pipe(calculate_productivity_score, agg_years=AGG_YEARS)
+        .pipe(add_efficiency_stats, agg_years=AGG_YEARS)
+        .pipe(calculate_years_since_peak)
+        .pipe(add_era_bucket)
+        .pipe(add_history_coverage, agg_years=AGG_YEARS)
+        .pipe(add_per_year_features, agg_years=AGG_YEARS, sum_cols=["G", "AB", "R", "H", "HR", "SB", "BB", "SO", "WAR"],)
+        .pipe(calculate_growths, agg_years=AGG_YEARS)
+        .pipe(add_player_tier, agg_years=AGG_YEARS)
+        .pipe(calculate_fantasy_points_percentile)
     )
 
     pitching_df = (
         pitching_df
         .pipe(_player_history_lookup)
+        .pipe(patch_missing_mlbam_ids)
         .pipe(add_overall_pick_features)
         .drop(columns=["mlbam_id"], errors="ignore")
+        .pipe(_add_deltas, agg_years=AGG_YEARS, core_cols=pitching_agg_cols)
+        .pipe(calculate_productivity_score, agg_years=AGG_YEARS)
+        .pipe(add_efficiency_stats, agg_years=AGG_YEARS)
+        .pipe(calculate_years_since_peak)
+        .pipe(add_pitcher_role_flags)
+        .pipe(add_era_bucket)
+        .pipe(add_history_coverage, agg_years=AGG_YEARS)
+        .pipe(add_per_year_features, agg_years=AGG_YEARS, sum_cols=["G", "GS", "IP", "W", "SO", "BB", "HR", "ER", "WAR"],)
+        .pipe(calculate_growths, agg_years=AGG_YEARS)
+        .pipe(add_player_tier, agg_years=AGG_YEARS)
+        .pipe(calculate_fantasy_points_percentile)
     )
-
-    # batting_df = fillna_numeric_only(batting_df, value=0)
-    # pitching_df = fillna_numeric_only(pitching_df, value=0)
 
     save_data(
             dataframes=[batting_df, pitching_df],
@@ -809,5 +903,5 @@ def pull_data(
             end_year=end_year,
     )
 
-    print("Data pull complete.")
+    print("Data pull & feature engineering complete.")
     return batting_df, pitching_df
