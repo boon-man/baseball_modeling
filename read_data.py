@@ -7,8 +7,8 @@ from typing import Callable, Literal, Optional
 import requests
 from bs4 import BeautifulSoup
 
-from modeling import (calculate_productivity_score, add_efficiency_stats, add_per_year_features, 
-    calculate_growths, calculate_years_since_peak, add_player_tier, add_pitcher_role_flags)
+from modeling import (calculate_productivity_score, calculate_fantasy_points_percentile, add_efficiency_stats, 
+    add_per_year_features, calculate_growths, calculate_years_since_peak, add_player_tier, add_pitcher_role_flags)
 from helper import (
     calc_fantasy_points_batting,
     calc_fantasy_points_pitching,
@@ -874,6 +874,7 @@ def pull_data(
         .pipe(add_per_year_features, agg_years=AGG_YEARS, sum_cols=["G", "AB", "R", "H", "HR", "SB", "BB", "SO", "WAR"],)
         .pipe(calculate_growths, agg_years=AGG_YEARS)
         .pipe(add_player_tier, agg_years=AGG_YEARS)
+        .pipe(calculate_fantasy_points_percentile)
     )
 
     pitching_df = (
@@ -892,6 +893,7 @@ def pull_data(
         .pipe(add_per_year_features, agg_years=AGG_YEARS, sum_cols=["G", "GS", "IP", "W", "SO", "BB", "HR", "ER", "WAR"],)
         .pipe(calculate_growths, agg_years=AGG_YEARS)
         .pipe(add_player_tier, agg_years=AGG_YEARS)
+        .pipe(calculate_fantasy_points_percentile)
     )
 
     save_data(

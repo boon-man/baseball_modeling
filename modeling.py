@@ -314,23 +314,92 @@ def calculate_years_since_peak(
     player_col="IDfg",
     year_col="Season",
     value_col="fantasy_points",
-    output_col="years_since_peak",
+    output_before_col="years_before_peak",
+    output_after_col="years_after_peak",
 ) -> pd.DataFrame:
     """
-    Adds a column indicating how many years it has been since each player's peak season (by value_col).
+    Adds columns indicating years before and after each player's peak season.
+    
     The peak is defined as the season with the maximum value_col for each player.
+    
+    - years_before_peak: years until peak (positive for pre-peak seasons, 0 for peak and after)
+    - years_after_peak: years since peak (0 for peak and before, positive for post-peak seasons)
+    - pct_of_peak_year: current season value as percentage of peak season value (0-100+)
+    
+    This separation avoids penalizing young players with negative values and allows
+    the model to learn different patterns for rising vs. declining phases.
+    pct_of_peak_year captures performance relative to career best.
     """
     df = df.copy()
-    # Find the peak year for each player
-    peak_years = df.groupby(player_col)[[value_col, year_col]].apply(
-        lambda g: g.loc[g[value_col].idxmax(), year_col]
-    )
-    # Map peak year to each row
+    
+    # Get the index of the row with max value per player
+    peak_idx = df.groupby(player_col)[value_col].idxmax()
+    
+    # Pull peak year and peak value from those rows
+    peak_years = df.loc[peak_idx, year_col]
+    peak_values = df.loc[peak_idx, value_col]
+    
+    # Map both to every row
     df["peak_year"] = df[player_col].map(peak_years)
-    # Calculate years since peak
-    df[output_col] = df[year_col] - df["peak_year"]
-    # If future seasons, years_since_peak will be negative; set to 0 for peak year, positive for after, negative for before
-    return df.drop(columns=["peak_year"])
+    df["peak_value"] = df[player_col].map(peak_values)
+    
+    # Calculate years relative to peak
+    years_diff = df[year_col] - df["peak_year"]
+    
+    # years_before_peak: positive when before peak, 0 otherwise
+    df[output_before_col] = np.where(years_diff < 0, -years_diff, 0)
+    
+    # years_after_peak: positive when after peak, 0 otherwise
+    df[output_after_col] = np.where(years_diff > 0, years_diff, 0)
+
+    # pct_of_peak_year: current season as % of peak (avoid division by zero)
+    df["pct_of_peak_year"] = np.where(
+        (df["peak_value"].notna()) & (df["peak_value"] > 0),
+        (df[value_col] / df["peak_value"]) * 100,
+        0.0
+    )
+    
+    return df.drop(columns=["peak_year", "peak_value"])
+
+def calculate_fantasy_points_percentile(
+    df: pd.DataFrame,
+    season_col: str = "Season",
+    fantasy_points_col: str = "fantasy_points",
+    output_col: str = "fantasy_points_percentile",
+) -> pd.DataFrame:
+    """
+    Calculate each player's fantasy points percentile within their season cohort.
+    
+    Percentile is computed relative to all other players in the same season,
+    allowing the model to learn how position relative to peers affects future performance.
+    
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Input dataframe with player season data.
+    player_col : str, default "IDfg"
+        Column name for player identifier.
+    season_col : str, default "Season"
+        Column name for season year.
+    fantasy_points_col : str, default "fantasy_points"
+        Column name containing fantasy points.
+    output_col : str, default "fantasy_points_percentile"
+        Name of the output percentile column.
+    
+    Returns
+    -------
+    pd.DataFrame
+        Input dataframe with new percentile column (0-100 scale).
+    """
+    df = df.copy()
+    
+    df[output_col] = (
+        df.groupby(season_col)[fantasy_points_col]
+        .rank(pct=True, method="average")
+        .mul(100)
+    )
+    
+    return df
 
 # Function to add player tier based on recent WAR per season performance
 def add_player_tier(
