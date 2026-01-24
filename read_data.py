@@ -3,24 +3,21 @@ import numpy as np
 from pybaseball import batting_stats, pitching_stats, playerid_reverse_lookup
 import os
 from pathlib import Path
-from typing import Callable, Literal, Optional
+from typing import Callable, Literal, Sequence
 import requests
 from bs4 import BeautifulSoup
 
-from modeling import (calculate_productivity_score, calculate_fantasy_points_percentile, add_efficiency_stats, 
+from modeling import (calculate_productivity_score, calculate_fantasy_points_percentile, _add_deltas, add_efficiency_stats, 
     add_per_year_features, calculate_growths, calculate_years_since_peak, add_player_tier, add_pitcher_role_flags)
 from helper import (
-    calc_fantasy_points_batting,
-    calc_fantasy_points_pitching,
+    calc_fantasy_points,
     add_suffix_to_columns,
     save_data,
     split_name,
-    _add_deltas,
 )
-from config import AGG_YEARS
+from config import AGG_YEARS, SCORING_RULES
 
 StatsFn = Callable[..., pd.DataFrame]
-FantasyFn = Callable[[pd.DataFrame, str], pd.DataFrame]
 
 
 def pull_projections(url: str):
@@ -519,8 +516,6 @@ def pull_agg_stats(
     career_years_back: int = 10,  # used for career
     qual: int = 1,
     suffix: str,
-    fantasy_fn: Optional[FantasyFn] = None,
-    fantasy_col: Optional[str] = None,
 ) -> pd.DataFrame:
     """
     Pulls and aggregates player statistics over a specified window or career span.
@@ -551,10 +546,6 @@ def pull_agg_stats(
         Minimum qualification threshold for stats pull.
     suffix : str
         Suffix to append to column names (except player ID and optionally the fantasy column).
-    fantasy_fn : Callable[[pd.DataFrame, str], pd.DataFrame], optional
-        Function to calculate fantasy points and add as a column.
-    fantasy_col : str, optional
-        Name of the fantasy points column to exclude from suffixing.
 
     Returns
     -------
@@ -582,16 +573,7 @@ def pull_agg_stats(
         .drop(columns=["Name", "Age"], errors="ignore")
     )
 
-    if fantasy_fn is not None:
-        if fantasy_col is None:
-            raise ValueError(
-                "If fantasy_fn is provided, fantasy_col must be provided too."
-            )
-        fantasy_fn(df, fantasy_col)
-
     exclude_cols = [player_id_col]
-    if fantasy_col is not None:
-        exclude_cols.append(fantasy_col)
 
     df = add_suffix_to_columns(
         df=df,
@@ -601,6 +583,56 @@ def pull_agg_stats(
 
     return df
 
+# Function for sorting player-season data prior to feature engineering
+def _sort_player_season(df: pd.DataFrame, *, player_col: str = "IDfg", season_col: str = "Season") -> pd.DataFrame:
+    return df.sort_values([player_col, season_col]).reset_index(drop=True)
+
+# Function for adding time-series features to player-season data
+def _add_player_time_series_features(df: pd.DataFrame, *, agg_years: int) -> pd.DataFrame:
+    out = df.pipe(_sort_player_season)
+
+    out = out.pipe(calculate_productivity_score, agg_years=agg_years)
+    out = out.pipe(calculate_years_since_peak)
+    out = out.pipe(calculate_fantasy_points_percentile)
+
+    return out
+
+def _add_tail_features(
+    df: pd.DataFrame,
+    *,
+    agg_years: int,
+    sum_cols: Sequence[str],
+) -> pd.DataFrame:
+    """
+    Apply the shared "end-of-pipeline" feature engineering steps.
+
+    This is intended to be reused for both batting and pitching datasets to keep the
+    pipeline consistent and avoid cross-model carryover.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Input batting/pitching dataframe.
+    agg_years : int
+        Base aggregation window (e.g., 3).
+    sum_cols : Sequence[str]
+        Counting/stat columns to normalize into per-year pace features
+        (should match the dataframe's schema).
+
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame with tail features added.
+    """
+    return (
+        df
+        .pipe(add_efficiency_stats, agg_years=agg_years)
+        .pipe(add_era_bucket)
+        .pipe(add_history_coverage, agg_years=agg_years)
+        .pipe(add_per_year_features, agg_years=agg_years, sum_cols=list(sum_cols))
+        .pipe(calculate_growths, agg_years=agg_years)
+        .pipe(add_player_tier, agg_years=agg_years)
+    )
 
 def pull_data(
     start_year: int,
@@ -611,6 +643,7 @@ def pull_data(
     batting_agg_cols: list,
     pitching_agg_cols: list,
     career_window_years: int = 10,
+    fmt: str = "UD",
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """
     Pulls, processes, and aggregates multi-year batting and pitching data for MLB players.
@@ -640,6 +673,8 @@ def pull_data(
         Whether to include future season fantasy points as target variable.
     career_window_years : int, default 10
         Number of years to use for career aggregates.
+    fmt : str, default 'UD'
+        Format specifier for fantasy scoring rules
 
     Returns
     -------
@@ -649,13 +684,13 @@ def pull_data(
 
     year_suffix = _year_suffix(start_year, end_year)
 
-    batting_path = f"data/batting_{year_suffix}.csv"
-    pitching_path = f"data/pitching_{year_suffix}.csv"
+    batting_path = f"data/batting_{year_suffix}_{fmt}.parquet"
+    pitching_path = f"data/pitching_{year_suffix}_{fmt}.parquet"
 
     if os.path.exists(batting_path) and os.path.exists(pitching_path):
-        batting_df = pd.read_csv(batting_path)
-        pitching_df = pd.read_csv(pitching_path)
-        print("Loaded existing data files.")
+        batting_df = pd.read_parquet(batting_path)
+        pitching_df = pd.read_parquet(pitching_path)
+        print(f"Loaded existing {fmt} data files.")
         return batting_df, pitching_df
 
     years = list(range(start_year, end_year + 1))
@@ -681,7 +716,7 @@ def pull_data(
             qual=50,
             split_seasons=True,
         ).filter(items=batting_stat_cols)
-        calc_fantasy_points_batting(batting_current, "fantasy_points")
+        calc_fantasy_points(batting_current, rules=SCORING_RULES[fmt]["bat"], out_col="fantasy_points")
 
         if year < end_year:
             # Future season (target)
@@ -690,7 +725,7 @@ def pull_data(
                 qual=50,
                 split_seasons=True,
             ).filter(items=batting_stat_cols)
-            calc_fantasy_points_batting(batting_future, "fantasy_points_future")
+            calc_fantasy_points(batting_future, rules=SCORING_RULES[fmt]["bat"], out_col="fantasy_points_future")
             batting_future = batting_future[["IDfg", "fantasy_points_future"]]
 
         # Prior k
@@ -702,9 +737,8 @@ def pull_data(
             window=agg_years,
             qual=50,
             suffix=f"_prior{agg_years}",
-            fantasy_fn=calc_fantasy_points_batting,
-            fantasy_col=f"fantasy_points_prior{agg_years}",
         )
+        calc_fantasy_points(bat_prior_k, rules=SCORING_RULES[fmt]["bat"], out_col=f"fantasy_points_prior{agg_years}")
 
         # Prior 2k
         bat_prior_2k = pull_agg_stats(
@@ -715,9 +749,8 @@ def pull_data(
             window=agg_years * 2,
             qual=50,
             suffix=f"_prior{agg_years * 2}",
-            fantasy_fn=calc_fantasy_points_batting,
-            fantasy_col=f"fantasy_points_prior{agg_years * 2}",
         )
+        calc_fantasy_points(bat_prior_2k, rules=SCORING_RULES[fmt]["bat"], out_col=f"fantasy_points_prior{agg_years * 2}")
 
         batting_priors = bat_prior_k.merge(bat_prior_2k, on="IDfg", how="outer")
 
@@ -730,8 +763,6 @@ def pull_data(
             window=career_window_years,
             qual=1,
             suffix="_career",
-            fantasy_fn=None,
-            fantasy_col=None,
         )
         # Calculate REW per year and dropping raw REW career total
         career_batting["REW_career_per_year"] = (
@@ -761,7 +792,7 @@ def pull_data(
             qual=15,
             split_seasons=True,
         ).filter(items=pitching_stat_cols)
-        calc_fantasy_points_pitching(pitching_current, "fantasy_points")
+        calc_fantasy_points(pitching_current, rules=SCORING_RULES[fmt]["pit"], out_col="fantasy_points")
 
         if year < end_year:
             pitching_future = pitching_stats(
@@ -769,8 +800,7 @@ def pull_data(
                 qual=15,
                 split_seasons=True,
             ).filter(items=pitching_stat_cols)
-
-            calc_fantasy_points_pitching(pitching_future, "fantasy_points_future")
+            calc_fantasy_points(pitching_future, rules=SCORING_RULES[fmt]["pit"], out_col="fantasy_points_future")
             pitching_future = pitching_future[["IDfg", "fantasy_points_future"]]
 
         pit_prior_k = pull_agg_stats(
@@ -781,9 +811,8 @@ def pull_data(
             window=agg_years,
             qual=15,
             suffix=f"_prior{agg_years}",
-            fantasy_fn=calc_fantasy_points_pitching,
-            fantasy_col=f"fantasy_points_prior{agg_years}",
         )
+        calc_fantasy_points(pit_prior_k, rules=SCORING_RULES[fmt]["pit"], out_col=f"fantasy_points_prior{agg_years}")
 
         pit_prior_2k = pull_agg_stats(
             stats_fn=pitching_stats,
@@ -793,9 +822,8 @@ def pull_data(
             window=agg_years * 2,
             qual=15,
             suffix=f"_prior{agg_years * 2}",
-            fantasy_fn=calc_fantasy_points_pitching,
-            fantasy_col=f"fantasy_points_prior{agg_years * 2}",
         )
+        calc_fantasy_points(pit_prior_2k, rules=SCORING_RULES[fmt]["pit"], out_col=f"fantasy_points_prior{agg_years * 2}")
 
         pitching_priors = pit_prior_k.merge(pit_prior_2k, on="IDfg", how="outer")
 
@@ -808,8 +836,6 @@ def pull_data(
             window=career_window_years,
             qual=1,
             suffix="_career",
-            fantasy_fn=None,
-            fantasy_col=None,
         )
         # Calculate REW per year and dropping raw REW career total
         career_pitching["REW_career_per_year"] = (
@@ -865,16 +891,9 @@ def pull_data(
         .pipe(patch_missing_mlbam_ids)
         .pipe(add_overall_pick_features)
         .drop(columns=["mlbam_id"], errors="ignore")
+        .pipe(_add_player_time_series_features, agg_years=AGG_YEARS)
         .pipe(_add_deltas, agg_years=AGG_YEARS, core_cols=batting_agg_cols)
-        .pipe(calculate_productivity_score, agg_years=AGG_YEARS)
-        .pipe(add_efficiency_stats, agg_years=AGG_YEARS)
-        .pipe(calculate_years_since_peak)
-        .pipe(add_era_bucket)
-        .pipe(add_history_coverage, agg_years=AGG_YEARS)
-        .pipe(add_per_year_features, agg_years=AGG_YEARS, sum_cols=["G", "AB", "R", "H", "HR", "SB", "BB", "SO", "WAR"],)
-        .pipe(calculate_growths, agg_years=AGG_YEARS)
-        .pipe(add_player_tier, agg_years=AGG_YEARS)
-        .pipe(calculate_fantasy_points_percentile)
+        .pipe(_add_tail_features, agg_years=AGG_YEARS, sum_cols=["G", "AB", "R", "H", "HR", "SB", "BB", "SO", "WAR"])
     )
 
     pitching_df = (
@@ -883,25 +902,83 @@ def pull_data(
         .pipe(patch_missing_mlbam_ids)
         .pipe(add_overall_pick_features)
         .drop(columns=["mlbam_id"], errors="ignore")
+        .pipe(_add_player_time_series_features, agg_years=AGG_YEARS)
         .pipe(_add_deltas, agg_years=AGG_YEARS, core_cols=pitching_agg_cols)
-        .pipe(calculate_productivity_score, agg_years=AGG_YEARS)
-        .pipe(add_efficiency_stats, agg_years=AGG_YEARS)
-        .pipe(calculate_years_since_peak)
+        .pipe(_add_tail_features, agg_years=AGG_YEARS, sum_cols=["G", "GS", "IP", "W", "SO", "BB", "HR", "ER", "WAR"])
         .pipe(add_pitcher_role_flags)
-        .pipe(add_era_bucket)
-        .pipe(add_history_coverage, agg_years=AGG_YEARS)
-        .pipe(add_per_year_features, agg_years=AGG_YEARS, sum_cols=["G", "GS", "IP", "W", "SO", "BB", "HR", "ER", "WAR"],)
-        .pipe(calculate_growths, agg_years=AGG_YEARS)
-        .pipe(add_player_tier, agg_years=AGG_YEARS)
-        .pipe(calculate_fantasy_points_percentile)
     )
 
     save_data(
-            dataframes=[batting_df, pitching_df],
-            file_names=["batting", "pitching"],
-            start_year=start_year,
-            end_year=end_year,
+        dataframes=[batting_df, pitching_df],
+        file_names=["batting", "pitching"],
+        start_year=start_year,
+        end_year=end_year,
+        fmt=fmt,
     )
 
     print("Data pull & feature engineering complete.")
     return batting_df, pitching_df
+
+# Function for data cleaning and preparation for modeling after initial data pull & feature engineering
+def prepare_data(
+    batting_df: pd.DataFrame,
+    pitching_df: pd.DataFrame,
+    *,
+    pred_season: int,
+    id_cols: list[str] | None = None,
+    season_col: str = "Season",
+    target_col: str = "fantasy_points_future",
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """
+    Prepare raw batting/pitching dataframes for modeling.
+
+    Returns
+    -------
+    batting_train, pitching_train, batting_pred, pitching_pred
+    """
+    id_cols = id_cols or ["IDfg"]  # not required, but handy for downstream consistency
+
+    # --- Cast types first (avoid downstream dtype surprises) ---
+    batting_df = cast_feature_dtypes(batting_df)
+    pitching_df = cast_feature_dtypes(pitching_df)
+
+    # --- Standardize season dtype ---
+    batting_df[season_col] = batting_df[season_col].astype(int)
+    pitching_df[season_col] = pitching_df[season_col].astype(int)
+
+    # --- Model-specific cleanup ---
+    batting_df = (
+        batting_df
+        .loc[batting_df["pos_type"] != "Pitcher"]
+        .copy()
+    )
+
+    pitching_df = (
+        pitching_df
+        .drop(columns=["pos_type", "primary_pos"], errors="ignore")
+        .copy()
+    )
+
+    # --- Split train vs pred ---
+    batting_pred = batting_df.loc[batting_df[season_col] == pred_season].copy()
+    pitching_pred = pitching_df.loc[pitching_df[season_col] == pred_season].copy()
+
+    batting_train = batting_df.loc[batting_df[season_col] < pred_season].copy()
+    pitching_train = pitching_df.loc[pitching_df[season_col] < pred_season].copy()
+
+    # --- Filter out non-draft-eligible training rows ---
+    batting_train = batting_train.loc[batting_train[target_col] > 0].copy()
+    pitching_train = pitching_train.loc[pitching_train[target_col] > 0].copy()
+
+    # Optional: keep ID cols at front if present (purely aesthetic)
+    front_cols = [c for c in id_cols if c in batting_train.columns]
+    if front_cols:
+        batting_train = batting_train[front_cols + [c for c in batting_train.columns if c not in front_cols]]
+        batting_pred  = batting_pred[front_cols  + [c for c in batting_pred.columns  if c not in front_cols]]
+
+    front_cols = [c for c in id_cols if c in pitching_train.columns]
+    if front_cols:
+        pitching_train = pitching_train[front_cols + [c for c in pitching_train.columns if c not in front_cols]]
+        pitching_pred  = pitching_pred[front_cols  + [c for c in pitching_pred.columns  if c not in front_cols]]
+
+    return batting_train, pitching_train, batting_pred, pitching_pred

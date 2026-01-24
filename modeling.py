@@ -6,15 +6,22 @@ from xgboost import XGBRegressor
 from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_error
 from hyperopt import fmin, tpe, Trials, STATUS_OK
 from IPython.display import display
-import warnings
 
+def _add_deltas(df: pd.DataFrame, *, agg_years: int, core_cols: list[str]) -> pd.DataFrame:
+    return calculate_delta(
+        df,
+        fantasy_points_col="fantasy_points",
+        agg_fantasy_points_col=f"fantasy_points_prior{agg_years}",
+        agg_years=agg_years,
+        core_cols=core_cols,
+    )
+    
 def calculate_delta(
     df: pd.DataFrame,
     fantasy_points_col: str = 'fantasy_points',
     agg_fantasy_points_col: str = 'fantasy_points_agg',
     agg_years: int = 3,
     core_cols: list | None = None,
-    output_col: str = 'fantasy_points_delta'
 ) -> pd.DataFrame:
     """
     Calculate deltas between current season values and multi-year averages for multiple columns.
@@ -51,111 +58,56 @@ def calculate_delta(
     -----
     Positive deltas indicate above-average performance; negative deltas indicate below-average.
     """
-    df = df.copy()
-    
-    # Calculate fantasy points delta
-    avg_fantasy_points = df[agg_fantasy_points_col] / agg_years
-    df[output_col] = df[fantasy_points_col] - avg_fantasy_points
-    
-    # Calculate deltas for aggregate columns if provided
+
+    out = df.copy()
+
+    out["fantasy_points_delta"] = out[fantasy_points_col] - (out[agg_fantasy_points_col] / agg_years)
+
     if core_cols:
-        for col in core_cols:
-            if col == 'IDfg':
-                continue
-            
-            agg_col = f'{col}{agg_years}'
-            delta_col = f'{col}_delta'
-            
-            # Only calculate if aggregated column exists
-            if agg_col in df.columns:
-                avg_col = df[agg_col] / agg_years
-                df[delta_col] = df[col] - avg_col
-    
-    return df
+        cols = [c for c in core_cols if c != "IDfg"]
+        agg_cols = [f"{c}{agg_years}" for c in cols]
+        # only keep ones that exist
+        pairs = [(c, a) for c, a in zip(cols, agg_cols) if a in out.columns and c in out.columns]
+
+        for c, a in pairs:
+            out[f"{c}_delta"] = out[c] - (out[a] / agg_years)
+
+    return out
 
 def calculate_productivity_score(
     df: pd.DataFrame,
     fantasy_points_col: str = "fantasy_points",
     age_col: str = "Age",
-    output_col: str = "productivity_score",
     agg_years: int = 3,
 ) -> pd.DataFrame:
-    df = df.copy()
+    out = df.copy()
 
-    # Ensure sorting
-    df = df.sort_values(["IDfg", "Season"]).reset_index(drop=True)
+    out["productivity_score"] = out[fantasy_points_col] / (out[age_col] ** 2)
 
-    # Base productivity
-    df["age_squared"] = df[age_col] ** 2
-    df[output_col] = df[fantasy_points_col] / df["age_squared"]
+    # assumes already sorted by IDfg, Season
+    g = out.groupby("IDfg", sort=False)
 
-    short_w = agg_years
-    long_w = agg_years * 2
-    # Season-aware rolling function, catching missing seasons (due to injury/relegation/suspension/inactivity)
-    def _season_aware(g: pd.DataFrame) -> pd.DataFrame:
-        g = g.sort_values("Season").copy()
+    out["missed_prev_season"] = (g["Season"].diff().fillna(1) > 1).astype("int8")
+    out["years_since_last_season"] = g["Season"].diff().fillna(1).astype("int16")
 
-        full_seasons = pd.Index(
-            range(int(g["Season"].min()), int(g["Season"].max()) + 1),
-            name="Season",
-        )
+    w = agg_years
+    w2 = agg_years * 2
 
-        s = (
-            g.set_index("Season")[output_col]
-            .reindex(full_seasons)
-            .astype(float)
-        )
+    out[f"productivity_{w}yr"] = g["productivity_score"].rolling(w, min_periods=1).mean().reset_index(level=0, drop=True)
+    out[f"productivity_{w2}yr"] = g["productivity_score"].rolling(w2, min_periods=1).mean().reset_index(level=0, drop=True)
 
-        played = s.notna()
+    # coverage counts (how many seasons observed in window)
+    out[f"productivity_covered_{w}yr"] = g["productivity_score"].rolling(w, min_periods=1).count().reset_index(level=0, drop=True).astype("int16")
+    out[f"productivity_covered_{w2}yr"] = g["productivity_score"].rolling(w2, min_periods=1).count().reset_index(level=0, drop=True).astype("int16")
 
-        # missed_prev_season: whether previous season was missed
-        prev_played = played.shift(1).fillna(True).astype(bool)   
-        missed_prev = (~prev_played).astype("Int64")
+    out["productivity_trend"] = g["productivity_score"].diff()
 
-        # years_since_last_season: gap since previous played season (consecutive years -> 1)
-        played_years = pd.Series(full_seasons, index=full_seasons).where(played)
-        prev_played_year = played_years.ffill().shift(1)
-        years_since_last = (pd.Series(full_seasons, index=full_seasons) - prev_played_year).astype("Float64")
+    out["recent_weight"] = (
+        out[f"productivity_covered_{w}yr"]
+        / out[f"productivity_covered_{w2}yr"].replace({0: pd.NA})
+    )
 
-        # map back to observed seasons
-        g["missed_prev_season"] = g["Season"].map(missed_prev).fillna(0).astype("int8")
-        g["years_since_last_season"] = g["Season"].map(years_since_last).fillna(0).astype("int16")
-
-        # Rolling means (missing seasons ignored in mean)
-        roll_short = s.rolling(window=short_w, min_periods=1).mean()
-        roll_long = s.rolling(window=long_w, min_periods=1).mean()
-
-        cov_short = played.rolling(window=short_w, min_periods=1).sum()
-        cov_long = played.rolling(window=long_w, min_periods=1).sum()
-
-        trend = s.diff()
-
-        g[f"productivity_{short_w}yr"] = g["Season"].map(roll_short)
-        g[f"productivity_{long_w}yr"] = g["Season"].map(roll_long)
-
-        g[f"productivity_covered_{short_w}yr"] = g["Season"].map(cov_short).astype("Int64")
-        g[f"productivity_covered_{long_w}yr"] = g["Season"].map(cov_long).astype("Int64")
-
-        g["productivity_trend"] = g["Season"].map(trend)
-
-        g["recent_weight"] = (
-            g[f"productivity_covered_{short_w}yr"]
-            / g[f"productivity_covered_{long_w}yr"].replace({0: pd.NA})
-        )
-
-        return g
-
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", category=FutureWarning)
-        warnings.simplefilter("ignore", category=UserWarning)
-
-        df = (
-            df.groupby("IDfg", group_keys=False)
-            .apply(_season_aware)
-            .reset_index(drop=True)
-        )
-
-    return df.drop(columns=["age_squared"])
+    return out
 
 # Calculate efficiency statistics regarding fantasy points per game
 def add_efficiency_stats(
@@ -605,7 +557,6 @@ def tune_xgb(
     evals: int = 75,
     random_state: int = 62820,
     id_cols: list[str] | None = None,
-    max_depth_choices: list[int] | None = None,
 ) -> dict:
     """
     Performs hyperparameter optimization for an XGBoost regressor using Hyperopt.
@@ -637,8 +588,6 @@ def tune_xgb(
         Random seed for reproducibility.
     id_cols : list of str, optional
         Columns to exclude from predictors (e.g., player IDs).
-    max_depth_choices : list of int, optional
-        List of possible max_depth values (for mapping Hyperopt choices).
 
     Returns
     -------
@@ -847,6 +796,139 @@ def create_model(
     )
 
     return model, test_pred
+
+# Function for extracting simulated bootstrap prediction intervals
+def generate_prediction_intervals(
+    X_train: pd.DataFrame,
+    y_train: pd.Series,
+    X_pred: pd.DataFrame,
+    *,
+    base_params: dict,
+    n_bootstrap: int = 30,
+    random_state: int = 62820,
+    id_cols: list[str] | None = None,
+    n_estimators: int = 5000,
+    early_stopping_rounds: int = 50,
+) -> pd.DataFrame:
+    """
+    Estimate prediction intervals via bootstrap-resampled XGBoost models.
+
+    Default strategy:
+      - Bootstrap sample at the *player* level (IDfg by default).
+      - Use out-of-bag (OOB) *players* each iteration for early stopping.
+      - Aggregate predictions across bootstraps to produce percentile intervals.
+
+    Notes:
+      - If OOB set is too small in an iteration, falls back to training without early stopping.
+    """
+    id_cols = id_cols or ["IDfg"]
+
+    def _drop_ids(df: pd.DataFrame) -> pd.DataFrame:
+        return df.drop(columns=[c for c in id_cols if c in df.columns], errors="ignore")
+
+    # --- Prepare matrices ---
+    X_tr = _drop_ids(X_train).reset_index(drop=True)
+    X_p = _drop_ids(X_pred).reset_index(drop=True)
+
+    y_tr_full = y_train.reset_index(drop=True)
+
+    # --- Params ---
+    params = {
+        "objective": "reg:squarederror",
+        "eval_metric": "rmse",
+        "tree_method": "hist",
+        "enable_categorical": True,
+    }
+    params.update(base_params or {})
+
+    # --- Out of Bag (OOB) grouping (player-level) ---
+    group_col = "IDfg"
+    if group_col not in X_train.columns:
+        raise ValueError(
+            "OOB-by-player default requires 'IDfg' to be present in X_train. "
+            "Either include it in X_train or change group_col in the function body."
+        )
+
+    group_ids = X_train[group_col].reset_index(drop=True).values
+    unique_players = pd.unique(group_ids)
+
+    # Guardrails
+    min_oob_rows = 200  # keep early stopping stable; adjust inside function if desired
+
+    preds_list: list[np.ndarray] = []
+
+    for b in range(n_bootstrap):
+        rng_b = np.random.default_rng(random_state + b)
+
+        # Sample players with replacement, then include all rows for sampled players
+        boot_players = rng_b.choice(unique_players, size=len(unique_players), replace=True)
+        boot_set = set(boot_players)
+
+        in_bag_mask = np.isin(group_ids, list(boot_set))
+        idx_boot = np.where(in_bag_mask)[0]
+        idx_oob = np.where(~in_bag_mask)[0]
+
+        X_fit = X_tr.iloc[idx_boot]
+        y_fit = y_tr_full.iloc[idx_boot]
+
+        model = XGBRegressor(
+            n_estimators=n_estimators,
+            random_state=random_state + b,
+            early_stopping_rounds=early_stopping_rounds,
+            n_jobs=-1,
+            **params,
+        )
+
+        # Use OOB players for early stopping when we have enough rows
+        use_oob = idx_oob.size >= min_oob_rows
+        if use_oob:
+            X_oob = X_tr.iloc[idx_oob]
+            y_oob = y_tr_full.iloc[idx_oob]
+            model.fit(X_fit, y_fit, eval_set=[(X_oob, y_oob)], verbose=False)
+        else:
+            # Fallback: fit without eval_set (early stopping won't activate)
+            model.fit(X_fit, y_fit, verbose=False)
+
+        base_preds = model.predict(X_p)
+
+        if use_oob:
+            oob_preds = model.predict(X_oob)
+            residuals = (y_oob.values - oob_preds)
+            residuals = residuals - residuals.mean()  # de-bias
+            noise = rng_b.choice(residuals, size=len(base_preds), replace=True)
+            preds = base_preds + noise
+        else:
+            preds = base_preds
+
+        preds_list.append(preds)
+
+    pred_mat = np.vstack(preds_list)  # (n_bootstrap, n_rows_pred)
+
+    out = pd.DataFrame(
+        {
+            "pred_mean": pred_mat.mean(axis=0),
+            "pred_p10": np.percentile(pred_mat, 10, axis=0),
+            "pred_p50": np.percentile(pred_mat, 50, axis=0),
+            "pred_p90": np.percentile(pred_mat, 90, axis=0),
+        },
+        index=X_pred.index,
+    )
+
+    downside_floor = 0.01 * out["pred_mean"].abs().clip(lower=1.0)  # 1% of mean
+
+    out["pred_width_80"] = out["pred_p90"] - out["pred_p10"]
+    out["pred_upside"] = out["pred_p90"] - out["pred_mean"]
+    out["pred_downside"] = out["pred_mean"] - out["pred_p10"]
+    out["implied_upside"] = out["pred_upside"] / (out["pred_downside"] + downside_floor)
+
+    # Prepend id columns from original X_pred when available
+    id_present = [c for c in id_cols if c in X_pred.columns]
+    if id_present:
+        ids = X_pred[id_present].reset_index(drop=True)
+        out = pd.concat([ids, out.reset_index(drop=True)], axis=1)
+        out.index = X_pred.index
+
+    return out
 
 def compile_predictions(
     complete_df: pd.DataFrame,
