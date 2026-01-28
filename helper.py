@@ -1,56 +1,15 @@
 import pandas as pd
 from datetime import datetime
 from modeling import calculate_delta
+from typing import Literal
 import os
 
-def calc_fantasy_points_batting(df, column_name):
-    """
-    Adds a fantasy points column to the DataFrame based on the provided calculation.
-
-    Parameters:
-    df (pd.DataFrame): The DataFrame to which the column will be added.
-    column_name (str): The name of the new column.
-
-    Returns:
-    pd.DataFrame: The DataFrame with the new fantasy points column added.
-    """
-    df[column_name] = (
-        (df["1B"] * 3)
-        + (df["2B"] * 6)
-        + (df["3B"] * 8)
-        + (df["HR"] * 10)
-        + (df["BB"] * 3)
-        + (df["HBP"] * 3)
-        + (df["RBI"] * 2)
-        + (df["R"] * 2)
-        + (df["SB"] * 4)
-    )
+def calc_fantasy_points(df: pd.DataFrame, *, rules: dict[str, float], out_col: str) -> pd.DataFrame:
+    df[out_col] = 0.0
+    for stat, w in rules.items():
+        if stat in df.columns:
+            df[out_col] += df[stat].fillna(0) * float(w)
     return df
-
-
-def calc_fantasy_points_pitching(df, column_name):
-    """
-    Adds a fantasy points column to the DataFrame based on the provided calculation.
-
-    Parameters:
-    df (pd.DataFrame): The DataFrame to which the column will be added.
-    column_name (str): The name of the new column.
-
-    Returns:
-    pd.DataFrame: The DataFrame with the new fantasy points column added.
-    """
-    df[column_name] = (df["W"] * 5) + (df["SO"] * 3) + (df["IP"] * 3) + (df["ER"] * -3)
-    return df
-
-def _add_deltas(df: pd.DataFrame, *, agg_years: int, core_cols: list[str]) -> pd.DataFrame:
-    return calculate_delta(
-        df,
-        fantasy_points_col="fantasy_points",
-        agg_fantasy_points_col=f"fantasy_points_prior{agg_years}",
-        agg_years=agg_years,
-        core_cols=core_cols,
-        output_col="fantasy_points_delta",
-    )
 
 def add_suffix_to_columns(df, suffix, exclude_columns):
     """
@@ -67,79 +26,113 @@ def add_suffix_to_columns(df, suffix, exclude_columns):
     df = df.rename(columns=lambda x: x + suffix if x not in exclude_columns else x)
     return df
 
+def _year_suffix(start_year: int, end_year: int) -> str:
+    return f"{start_year}" if start_year == end_year else f"{start_year}_{end_year}"
+
 
 def save_data(
     *,
-    dataframes: list,
+    dataframes: list[pd.DataFrame],
     file_names: list[str],
     start_year: int,
     end_year: int,
     data_folder: str = "data",
+    fmt: str = "UD",               
+    file_type: Literal["parquet", "csv"] = "parquet",
+    parquet_engine: str = "pyarrow",
+    parquet_compression: str = "zstd",
 ) -> None:
     """
     Save one or more DataFrames to disk with consistent, intention-revealing filenames.
 
-    Filenames follow the pattern:
-      - Multi-year range:  <file_name>_<tag>_<start>_<end>.csv
-      - Single year only:  <file_name>_<tag>_<year>.csv
+    Filenames:
+      - <file_name>_<start>_<end>[_<fmt>].parquet
+      - <file_name>_<year>[_<fmt>].parquet
 
-    Examples
-    --------
-    - Training set spanning multiple years:
-        batting_data_train_2017_2024.csv
-    - Prediction set for a single year:
-        batting_data_pred_2025.csv
-
-    Parameters
-    ----------
-    dataframes : list[pd.DataFrame]
-        DataFrames to write.
-    file_names : list[str]
-        Base file names (e.g., ["batting_data", "pitching_data"]).
-    start_year : int
-        Start year included in the dataset.
-    end_year : int
-        End year included in the dataset.
-        If None, files are saved without a tag.
-    data_folder : str, default "data"
-        Output directory.
-
-    Returns
-    -------
-    None
+    Examples:
+      batting_2017_2024_UD.parquet
+      pitching_2025_DK.parquet
     """
     os.makedirs(data_folder, exist_ok=True)
 
-    # Year suffix: single year uses one value, ranges use both.
-    if start_year == end_year:
-        year_suffix = f"{start_year}"
-    else:
-        year_suffix = f"{start_year}_{end_year}"
+    year_suffix = _year_suffix(start_year, end_year)
+    fmt_suffix = f"_{fmt}" if fmt is not None else ""
 
     for df, file_name in zip(dataframes, file_names):
-        out_path = os.path.join(data_folder, f"{file_name}_{year_suffix}.csv")
-        df.to_csv(out_path, index=False)
+        if file_type == "parquet":
+            out_path = os.path.join(
+                data_folder, f"{file_name}_{year_suffix}{fmt_suffix}.parquet"
+            )
+            df.to_parquet(
+                out_path,
+                index=False,
+                engine=parquet_engine,
+                compression=parquet_compression,
+            )
+        elif file_type == "csv":
+            out_path = os.path.join(
+                data_folder, f"{file_name}_{year_suffix}{fmt_suffix}.csv"
+            )
+            df.to_csv(out_path, index=False)
+        else:
+            raise ValueError(f"Unsupported file_type: {file_type}")
 
-    print("Data saved successfully.")
+    print(f"Data saved successfully ({file_type}).")
 
 
-def load_training_data():
+def load_training_data(
+    *,
+    year: int | None = None,
+    data_folder: str = "data",
+    fmt: str = "UD",  
+) -> tuple[pd.DataFrame, pd.DataFrame]:
     """
-    Loads the 'batting_data' and 'pitching_data' files for the current year from the 'data' directory.
+    Loads the batting_data and pitching_data Parquet files for a given year
+    and scoring format.
 
-    Returns:
-    tuple: A tuple containing two DataFrames, one for batting data and one for pitching data.
+    Expected filenames:
+      - batting_data_<year>[_<fmt>].parquet
+      - pitching_data_<year>[_<fmt>].parquet
+
+    Parameters
+    ----------
+    year : int, optional
+        Year to load (defaults to current year).
+    data_folder : str, default "data"
+        Directory containing the data files.
+    fmt : {"UD", "DK"}, optional
+        Scoring format suffix.
+
+    Returns
+    -------
+    batting_df : pd.DataFrame
+    pitching_df : pd.DataFrame
+
+    Raises
+    ------
+    FileNotFoundError
+        If one or both parquet files are missing.
     """
-    current_year = datetime.now().strftime("%Y")
-    data_folder = "data"
-    batting_data_path = os.path.join(data_folder, f"batting_data_{current_year}.csv")
-    pitching_data_path = os.path.join(data_folder, f"pitching_data_{current_year}.csv")
+    year = year or int(datetime.now().strftime("%Y"))
+    fmt_suffix = f"_{fmt}" if fmt is not None else ""
 
-    batting_df = pd.read_csv(batting_data_path)
-    pitching_df = pd.read_csv(pitching_data_path)
+    batting_path = os.path.join(
+        data_folder, f"batting_data_{year}{fmt_suffix}.parquet"
+    )
+    pitching_path = os.path.join(
+        data_folder, f"pitching_data_{year}{fmt_suffix}.parquet"
+    )
+
+    if not os.path.exists(batting_path):
+        raise FileNotFoundError(f"Missing batting file: {batting_path}")
+
+    if not os.path.exists(pitching_path):
+        raise FileNotFoundError(f"Missing pitching file: {pitching_path}")
+
+    batting_df = pd.read_parquet(batting_path)
+    pitching_df = pd.read_parquet(pitching_path)
 
     return batting_df, pitching_df
-
 
 def split_name(df, name_column):
     """
