@@ -936,7 +936,7 @@ def prepare_data(
     -------
     batting_train, pitching_train, batting_pred, pitching_pred
     """
-    id_cols = id_cols or ["IDfg"]  # not required, but handy for downstream consistency
+    id_cols = id_cols or ["IDfg"] 
 
     # --- Cast types first (avoid downstream dtype surprises) ---
     batting_df = cast_feature_dtypes(batting_df)
@@ -982,3 +982,79 @@ def prepare_data(
         pitching_pred  = pitching_pred[front_cols  + [c for c in pitching_pred.columns  if c not in front_cols]]
 
     return batting_train, pitching_train, batting_pred, pitching_pred
+
+# Helper function for expert batting projections preparation
+def _prepare_batting_projections(
+    df: pd.DataFrame,
+    *,
+    bat_rules: dict,
+    hbp_default: int = 6,
+    out_col: str = "projected_fantasy_points",
+) -> pd.DataFrame:
+    out = df.copy()
+
+    out["Positions"] = out["Positions"].fillna("DH")
+
+    # Singles = H - 2B - 3B - HR
+    out["1B"] = out["H"] - out["2B"] - out["3B"] - out["HR"]
+
+    # Default HBP assumption
+    out["HBP"] = hbp_default
+
+    out = calc_fantasy_points(out, rules=bat_rules, out_col=out_col)
+
+    return out[["first_name", "last_name", "Team", "Positions", out_col]].copy()
+
+# Helper function for expert pitching projections preparation
+def _prepare_pitching_projections(
+    df: pd.DataFrame,
+    *,
+    pit_rules: dict,
+    out_col: str = "projected_fantasy_points",
+) -> pd.DataFrame:
+    out = df.copy()
+
+    out["Positions"] = out["Positions"].fillna("SP")
+
+    # Normalize naming for strikeouts
+    out = out.rename(columns={"K": "SO"})
+
+    out = calc_fantasy_points(out, rules=pit_rules, out_col=out_col)
+
+    return out[["first_name", "last_name", "Team", "Positions", out_col]].copy()
+
+# Main function to pull and prepare expert projections
+def get_expert_projections(
+    *,
+    batting_url: str,
+    pitching_url: str,
+    fmt: str,
+    scoring_rules: dict,
+    hbp_default: int = 6,
+    out_col: str = "projected_fantasy_points",
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Pull and prepare expert projections for batters and pitchers.
+
+    Returns
+    -------
+    (batting_projections, pitching_projections)
+        Each includes: first_name, last_name, Team, Positions, projected_fantasy_points
+    """
+    bat_raw = pull_projections(batting_url)
+    pit_raw = pull_projections(pitching_url)
+
+    bat = _prepare_batting_projections(
+        bat_raw,
+        bat_rules=scoring_rules[fmt]["bat"],
+        hbp_default=hbp_default,
+        out_col=out_col,
+    )
+
+    pit = _prepare_pitching_projections(
+        pit_raw,
+        pit_rules=scoring_rules[fmt]["pit"],
+        out_col=out_col,
+    )
+
+    return bat, pit

@@ -1,3 +1,6 @@
+from hyperopt import hp
+import numpy as np
+
 # Defining scoring formats and their corresponding rules
 SCORING_RULES: dict[str, dict[str, float]] = {
     "UD": {
@@ -8,6 +11,22 @@ SCORING_RULES: dict[str, dict[str, float]] = {
         "bat": {"1B": 3, "2B": 5, "3B": 8, "HR": 10, "BB": 2, "HBP": 2, "RBI": 2, "R": 2, "SB": 5},
         "pit": {"W": 4, "SO": 2, "IP": 2.25, "ER": -2, "H": -0.6, "BB": -0.6, "HBP": -0.6, "CG": 2.5, "ShO": 2.5},
     },
+}
+
+# Defining hyperparameter search space
+param_space = {
+    "learning_rate": hp.loguniform("learning_rate", np.log(0.015), np.log(0.07)),
+
+    # leaf-based complexity control
+    "max_leaves": hp.quniform("max_leaves", 8, 48, 1),
+
+    "subsample": hp.uniform("subsample", 0.75, 0.95),
+    "colsample_bytree": hp.uniform("colsample_bytree", 0.6, 0.95),
+
+    "min_child_weight": hp.loguniform("min_child_weight", np.log(0.5), np.log(10.0)),
+    "reg_lambda": hp.loguniform("reg_lambda", np.log(1e-2), np.log(5.0)),
+    "reg_alpha": hp.loguniform("reg_alpha", np.log(1e-2), np.log(10.0)),
+    "gamma": hp.loguniform("gamma", np.log(1e-5), np.log(2.0)),
 }
 
 # Defining number of seasons to aggregate on historical pulls
@@ -25,8 +44,8 @@ MLB_COLOR_PALETTE = [
 
 # Dampening parameter for MLB positional groups, helpful for re-balancing rankings based on positional ADP demands
 POS_DAMPENING_MAP = {
-    "P": 0.90,    
-    "IF": 0.90,   
+    "P": 0.95,    
+    "IF": 0.9,   
     "OF": 1.1,   
 }
 
