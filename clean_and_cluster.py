@@ -2,6 +2,7 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 from sklearn.cluster import KMeans
+from helper import get_value_before_comma
 
 
 def assign_position_group(df: pd.DataFrame, position_col: str):
@@ -78,6 +79,126 @@ def _apply_position_dampening(
     out[value_col] = out[value_col] * out[adjustment_col]
 
     return out
+
+def finalize_predictions(
+    df: pd.DataFrame,
+    *,
+    mode: str,
+    id_col: str = "IDfg",
+    name_col: str = "Name",
+    first_name_col: str = "first_name",
+    last_name_col: str = "last_name",
+    position_col: str = "Positions",
+) -> pd.DataFrame:
+    """
+    Final cleanup and formatting for model + expert fantasy projections.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Combined prediction dataframe (model + expert projections).
+    mode : {"bat", "pit"}
+        Whether this is batter or pitcher data.
+    id_col, name_col, first_name_col, last_name_col : str
+        Column names for player identifiers.
+    position_col : str
+        Column containing positional eligibility.
+
+    Returns
+    -------
+    pd.DataFrame
+        Cleaned, standardized dataframe ready for ranking / export.
+    """
+    if mode not in {"bat", "pit"}:
+        raise ValueError("mode must be one of {'bat', 'pit'}")
+
+    out = df.copy()
+
+    # Suppress the SettingWithCopyWarning while updating player names
+    pd.options.mode.chained_assignment = None  # default='warn'
+
+    # -------------------------
+    # Name cleanup
+    # -------------------------
+    out[name_col] = out[name_col].fillna(
+        out[first_name_col].str.capitalize()
+        + " "
+        + out[last_name_col].str.capitalize()
+    )
+
+    # -------------------------
+    # Position handling
+    # -------------------------
+    default_pos = "DH" if mode == "bat" else "SP"
+
+    out[position_col] = out[position_col].fillna(default_pos)
+
+    # Take first listed position
+    out[position_col] = out[position_col].apply(get_value_before_comma)
+
+    # Collapse OF positions for batters
+    if mode == "bat":
+        out[position_col] = out[position_col].replace(
+            {"LF": "OF", "CF": "OF", "RF": "OF"}
+        )
+
+    out = out.rename(columns={position_col: "Position"})
+
+    # -------------------------
+    # Column selection (final schema)
+    # -------------------------
+    final_cols = [
+        id_col,
+        name_col,
+        "Age",
+        "Team",
+        "Position",
+        "fantasy_points_pred",
+        "projected_fantasy_points",
+        "pred_downside",
+        "pred_upside",
+        "pred_width_80",
+        "implied_upside",
+    ]
+
+    return out[final_cols]
+
+def create_draft_pool(
+    df: pd.DataFrame,
+    *,
+    model_weight: float,
+    projection_weight: float,
+    model_col: str = "fantasy_points_pred",
+    projection_col: str = "projected_fantasy_points",
+    out_col: str = "final_projection",
+    rank_col: str = "initial_rank",
+    rank_cutoff: int | None = None,
+) -> pd.DataFrame:
+    """
+    Compute weighted final projection, initial rank, and optionally
+    filter to a draft pool cutoff.
+    """
+    df = (
+        df
+        .assign(
+            **{
+                out_col: lambda d: (
+                    d[model_col] * model_weight
+                    + d[projection_col] * projection_weight
+                )
+            }
+        )
+        .assign(
+            **{
+                rank_col: lambda d: d[out_col].rank(ascending=False)
+            }
+        )
+    )
+
+    if rank_cutoff is not None:
+        df = df.loc[df[rank_col] <= rank_cutoff]
+
+    return df
 
 def calculate_relative_value(
     df: pd.DataFrame,
