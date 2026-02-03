@@ -758,7 +758,7 @@ def tune_xgb(
             n_jobs=-1,
             tree_method="hist",
             eval_metric=metric,
-            early_stopping_rounds=100,
+            early_stopping_rounds=150,
         )
 
         model.fit(X_tr, y_train, eval_set=[(X_v, y_val)], verbose=False)

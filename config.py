@@ -1,6 +1,13 @@
 from hyperopt import hp
 import numpy as np
 
+# Player postition overrides (there may be conflicts between sources)
+BAT_POS_OVERRIDES = {
+    "Shohei Ohtani": "OF",
+    "Rafael Devers": "OF",
+    "Tyler Soderstrom": "OF",
+}
+
 # Defining scoring formats and their corresponding rules
 SCORING_RULES: dict[str, dict[str, float]] = {
     "UD": {
@@ -15,7 +22,7 @@ SCORING_RULES: dict[str, dict[str, float]] = {
 
 # Defining hyperparameter search space
 param_space = {
-    "learning_rate": hp.loguniform("learning_rate", np.log(0.015), np.log(0.07)),
+    "learning_rate": hp.loguniform("learning_rate", np.log(0.01), np.log(0.07)),
 
     # leaf-based complexity control
     "max_leaves": hp.quniform("max_leaves", 8, 48, 1),
@@ -23,9 +30,9 @@ param_space = {
     "subsample": hp.uniform("subsample", 0.75, 0.95),
     "colsample_bytree": hp.uniform("colsample_bytree", 0.6, 0.95),
 
-    "min_child_weight": hp.loguniform("min_child_weight", np.log(0.5), np.log(10.0)),
-    "reg_lambda": hp.loguniform("reg_lambda", np.log(1e-2), np.log(5.0)),
-    "reg_alpha": hp.loguniform("reg_alpha", np.log(1e-2), np.log(10.0)),
+    "min_child_weight": hp.loguniform("min_child_weight", np.log(0.1), np.log(10.0)),
+    "reg_lambda": hp.loguniform("reg_lambda", np.log(1e-3), np.log(10.0)),
+    "reg_alpha": hp.loguniform("reg_alpha", np.log(1e-3), np.log(10.0)),
     "gamma": hp.loguniform("gamma", np.log(1e-5), np.log(2.0)),
 }
 
@@ -44,7 +51,7 @@ MLB_COLOR_PALETTE = [
 
 # Dampening parameter for MLB positional groups, helpful for re-balancing rankings based on positional ADP demands
 POS_DAMPENING_MAP = {
-    "P": 0.9,    
+    "P": 0.95,    
     "IF": 0.9,   
     "OF": 1.1,   
 }

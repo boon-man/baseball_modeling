@@ -80,6 +80,16 @@ def _apply_position_dampening(
 
     return out
 
+def split_batters_if_of(
+    batting_df: pd.DataFrame,
+    *,
+    position_col: str = "Position",
+    of_label: str = "OF",
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    batting_if = batting_df.loc[batting_df[position_col] != of_label].copy()
+    batting_of = batting_df.loc[batting_df[position_col] == of_label].copy()
+    return batting_if, batting_of
+
 def finalize_predictions(
     df: pd.DataFrame,
     *,
@@ -89,6 +99,9 @@ def finalize_predictions(
     first_name_col: str = "first_name",
     last_name_col: str = "last_name",
     position_col: str = "Positions",
+    position_overrides: dict[str, str] | None = None,
+    model_pred_col: str = "fantasy_points_pred",
+    proj_col: str = "projected_fantasy_points",
 ) -> pd.DataFrame:
     """
     Final cleanup and formatting for model + expert fantasy projections.
@@ -103,6 +116,11 @@ def finalize_predictions(
         Column names for player identifiers.
     position_col : str
         Column containing positional eligibility.
+    position_overrides : dict[str, str], optional
+        Mapping of player Name -> Position to force overrides (e.g., {"Shohei Ohtani": "OF"}).
+        Applied after normalization and OF collapsing for batters.
+    model_pred_col, proj_col : str
+        Column names for model prediction and external projection.
 
     Returns
     -------
@@ -114,35 +132,47 @@ def finalize_predictions(
 
     out = df.copy()
 
-    # Suppress the SettingWithCopyWarning while updating player names
-    pd.options.mode.chained_assignment = None  # default='warn'
-
     # -------------------------
     # Name cleanup
     # -------------------------
-    out[name_col] = out[name_col].fillna(
-        out[first_name_col].str.capitalize()
-        + " "
-        + out[last_name_col].str.capitalize()
-    )
+    if name_col in out.columns and first_name_col in out.columns and last_name_col in out.columns:
+        filled_name = (
+            out[first_name_col].astype("string").str.strip().str.capitalize()
+            + " "
+            + out[last_name_col].astype("string").str.strip().str.capitalize()
+        )
+        out[name_col] = out[name_col].astype("string").fillna(filled_name)
 
     # -------------------------
     # Position handling
     # -------------------------
     default_pos = "DH" if mode == "bat" else "SP"
 
-    out[position_col] = out[position_col].fillna(default_pos)
+    if position_col in out.columns:
+        out[position_col] = out[position_col].fillna(default_pos)
+        out[position_col] = out[position_col].apply(get_value_before_comma)
 
-    # Take first listed position
-    out[position_col] = out[position_col].apply(get_value_before_comma)
+        if mode == "bat":
+            out[position_col] = out[position_col].replace({"LF": "OF", "CF": "OF", "RF": "OF"})
 
-    # Collapse OF positions for batters
-    if mode == "bat":
-        out[position_col] = out[position_col].replace(
-            {"LF": "OF", "CF": "OF", "RF": "OF"}
-        )
+        out = out.rename(columns={position_col: "Position"})
+    else:
+        out["Position"] = default_pos
 
-    out = out.rename(columns={position_col: "Position"})
+    # -------------------------
+    # Custom position overrides (by Name)
+    # -------------------------
+    if position_overrides:
+        if name_col not in out.columns:
+            raise ValueError(f"Cannot apply position_overrides because '{name_col}' is missing.")
+        out["Position"] = out["Position"].mask(out[name_col].isin(position_overrides), out[name_col].map(position_overrides))
+
+    # -------------------------
+    # Fill missing preds / projections (both directions)
+    # -------------------------
+    if model_pred_col in out.columns and proj_col in out.columns:
+        out[model_pred_col] = out[model_pred_col].fillna(out[proj_col])
+        out[proj_col] = out[proj_col].fillna(out[model_pred_col])
 
     # -------------------------
     # Column selection (final schema)
@@ -153,13 +183,16 @@ def finalize_predictions(
         "Age",
         "Team",
         "Position",
-        "fantasy_points_pred",
-        "projected_fantasy_points",
+        model_pred_col,
+        proj_col,
         "pred_downside",
         "pred_upside",
         "pred_width_80",
         "implied_upside",
     ]
+
+    # keep only existing columns (prevents KeyError if some aren't present)
+    final_cols = [c for c in final_cols if c in out.columns]
 
     return out[final_cols]
 
