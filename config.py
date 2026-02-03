@@ -43,7 +43,7 @@ AGG_YEARS = 3
 MLB_COLOR_PALETTE = [
     "#1E5BA8",  # deep blue
     "#C8102E",  # strong red
-    "#FFB81C",  # gold
+    "#DA8D2F",  # orange
     "#1F8A70",  # teal/green
     "#6F2DBD",  # bold purple
     "#2F2F2F",  # near-black for accents

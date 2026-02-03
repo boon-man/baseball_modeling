@@ -210,7 +210,7 @@ def plot_actual_vs_pred_mlb(
         ggplot(df, aes(x=pred_col, y=actual_col))
 
         # Scatter points (primary visual)
-        + geom_point(alpha=0.75, size=1.2, color=color_palette[0])
+        + geom_point(alpha=0.65, size=1.2, color=color_palette[0])
 
         # Fitted line + confidence interval (lighter blue, de-emphasized)
         + geom_smooth(
@@ -390,7 +390,7 @@ def plot_resid_vs_pred_mlb(
             x="Predicted Fantasy Points",
             y="Prediction Diff (Predicted - Actual)",
         )
-        + geom_point(alpha=0.75, size=1.2, color=color_palette[1])
+        + geom_point(alpha=0.65, size=1.2, color=color_palette[1])
         + geom_hline(yintercept=0, linetype="dashed", color="grey", alpha=0.7)
         + annotate(
             "rect",
@@ -497,7 +497,7 @@ def plot_resid_hist_mlb(
         + geom_histogram(
             binwidth=binwidth,
             fill=color_palette[2],
-            alpha=0.8,
+            alpha=0.75,
             color="white",
         )
         + annotate(
@@ -628,9 +628,9 @@ def plot_decile_calib(
             aes(x="mean_pred", y="mean_actual", label="diff_label"),
             va="bottom",
             ha="center",
-            color="grey",
+            color="#444444",
             fontweight="bold",
-            size=10,
+            size=11,
             nudge_y=nudge_y,
         )
         + labs(
