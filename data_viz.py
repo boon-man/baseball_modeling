@@ -497,7 +497,7 @@ def plot_resid_hist_mlb(
         + geom_histogram(
             binwidth=binwidth,
             fill=color_palette[2],
-            alpha=0.75,
+            alpha=0.8,
             color="white",
         )
         + annotate(
@@ -609,11 +609,12 @@ def plot_decile_calib(
         + geom_point(
             fill=color_palette[3],
             color=color_palette[3],
-            size=2,
+            alpha=0.9,
+            size=1.5,
         )
         + geom_line(
             color=color_palette[3],
-            alpha=1.0,
+            alpha=0.9,
             size=0.75,
         )
         + geom_abline(
@@ -628,9 +629,9 @@ def plot_decile_calib(
             aes(x="mean_pred", y="mean_actual", label="diff_label"),
             va="bottom",
             ha="center",
-            color="#444444",
+            color="#555555",
             fontweight="bold",
-            size=11,
+            size=10,
             nudge_y=nudge_y,
         )
         + labs(
