@@ -2,6 +2,7 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 from sklearn.cluster import KMeans
+from helper import get_value_before_comma
 
 
 def assign_position_group(df: pd.DataFrame, position_col: str):
@@ -78,6 +79,159 @@ def _apply_position_dampening(
     out[value_col] = out[value_col] * out[adjustment_col]
 
     return out
+
+def split_batters_if_of(
+    batting_df: pd.DataFrame,
+    *,
+    position_col: str = "Position",
+    of_label: str = "OF",
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    batting_if = batting_df.loc[batting_df[position_col] != of_label].copy()
+    batting_of = batting_df.loc[batting_df[position_col] == of_label].copy()
+    return batting_if, batting_of
+
+def finalize_predictions(
+    df: pd.DataFrame,
+    *,
+    mode: str,
+    id_col: str = "IDfg",
+    name_col: str = "Name",
+    first_name_col: str = "first_name",
+    last_name_col: str = "last_name",
+    position_col: str = "Positions",
+    position_overrides: dict[str, str] | None = None,
+    model_pred_col: str = "fantasy_points_pred",
+    proj_col: str = "projected_fantasy_points",
+) -> pd.DataFrame:
+    """
+    Final cleanup and formatting for model + expert fantasy projections.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Combined prediction dataframe (model + expert projections).
+    mode : {"bat", "pit"}
+        Whether this is batter or pitcher data.
+    id_col, name_col, first_name_col, last_name_col : str
+        Column names for player identifiers.
+    position_col : str
+        Column containing positional eligibility.
+    position_overrides : dict[str, str], optional
+        Mapping of player Name -> Position to force overrides (e.g., {"Shohei Ohtani": "OF"}).
+        Applied after normalization and OF collapsing for batters.
+    model_pred_col, proj_col : str
+        Column names for model prediction and external projection.
+
+    Returns
+    -------
+    pd.DataFrame
+        Cleaned, standardized dataframe ready for ranking / export.
+    """
+    if mode not in {"bat", "pit"}:
+        raise ValueError("mode must be one of {'bat', 'pit'}")
+
+    out = df.copy()
+
+    # -------------------------
+    # Name cleanup
+    # -------------------------
+    if name_col in out.columns and first_name_col in out.columns and last_name_col in out.columns:
+        filled_name = (
+            out[first_name_col].astype("string").str.strip().str.capitalize()
+            + " "
+            + out[last_name_col].astype("string").str.strip().str.capitalize()
+        )
+        out[name_col] = out[name_col].astype("string").fillna(filled_name)
+
+    # -------------------------
+    # Position handling
+    # -------------------------
+    default_pos = "DH" if mode == "bat" else "SP"
+
+    if position_col in out.columns:
+        out[position_col] = out[position_col].fillna(default_pos)
+        out[position_col] = out[position_col].apply(get_value_before_comma)
+
+        if mode == "bat":
+            out[position_col] = out[position_col].replace({"LF": "OF", "CF": "OF", "RF": "OF"})
+
+        out = out.rename(columns={position_col: "Position"})
+    else:
+        out["Position"] = default_pos
+
+    # -------------------------
+    # Custom position overrides (by Name)
+    # -------------------------
+    if position_overrides:
+        if name_col not in out.columns:
+            raise ValueError(f"Cannot apply position_overrides because '{name_col}' is missing.")
+        out["Position"] = out["Position"].mask(out[name_col].isin(position_overrides), out[name_col].map(position_overrides))
+
+    # -------------------------
+    # Fill missing preds / projections (both directions)
+    # -------------------------
+    if model_pred_col in out.columns and proj_col in out.columns:
+        out[model_pred_col] = out[model_pred_col].fillna(out[proj_col])
+        out[proj_col] = out[proj_col].fillna(out[model_pred_col])
+
+    # -------------------------
+    # Column selection (final schema)
+    # -------------------------
+    final_cols = [
+        id_col,
+        name_col,
+        "Age",
+        "Team",
+        "Position",
+        model_pred_col,
+        proj_col,
+        "pred_downside",
+        "pred_upside",
+        "pred_width_80",
+        "implied_upside",
+    ]
+
+    # keep only existing columns (prevents KeyError if some aren't present)
+    final_cols = [c for c in final_cols if c in out.columns]
+
+    return out[final_cols]
+
+def create_draft_pool(
+    df: pd.DataFrame,
+    *,
+    model_weight: float,
+    projection_weight: float,
+    model_col: str = "fantasy_points_pred",
+    projection_col: str = "projected_fantasy_points",
+    out_col: str = "final_projection",
+    rank_col: str = "initial_rank",
+    rank_cutoff: int | None = None,
+) -> pd.DataFrame:
+    """
+    Compute weighted final projection, initial rank, and optionally
+    filter to a draft pool cutoff.
+    """
+    df = (
+        df
+        .assign(
+            **{
+                out_col: lambda d: (
+                    d[model_col] * model_weight
+                    + d[projection_col] * projection_weight
+                )
+            }
+        )
+        .assign(
+            **{
+                rank_col: lambda d: d[out_col].rank(ascending=False)
+            }
+        )
+    )
+
+    if rank_cutoff is not None:
+        df = df.loc[df[rank_col] <= rank_cutoff]
+
+    return df
 
 def calculate_relative_value(
     df: pd.DataFrame,
