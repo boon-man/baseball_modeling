@@ -352,48 +352,53 @@ def calculate_years_since_peak(
     output_after_col="years_after_peak",
 ) -> pd.DataFrame:
     """
-    Adds columns indicating years before and after each player's peak season.
+    Adds columns indicating years after each player's peak season.
     
     The peak is defined as the season with the maximum value_col for each player.
     
     - years_before_peak: years until peak (positive for pre-peak seasons, 0 for peak and after)
-    - years_after_peak: years since peak (0 for peak and before, positive for post-peak seasons)
     - pct_of_peak_year: current season value as percentage of peak season value (0-100+)
     
     This separation avoids penalizing young players with negative values and allows
     the model to learn different patterns for rising vs. declining phases.
     pct_of_peak_year captures performance relative to career best.
     """
-    df = df.copy()
-    
-    # Get the index of the row with max value per player
-    peak_idx = df.groupby(player_col)[value_col].idxmax()
-    
-    # Pull peak year and peak value from those rows
-    peak_years = df.loc[peak_idx, year_col]
-    peak_values = df.loc[peak_idx, value_col]
-    
-    # Map both to every row
-    df["peak_year"] = df[player_col].map(peak_years)
-    df["peak_value"] = df[player_col].map(peak_values)
-    
-    # Calculate years relative to peak
-    years_diff = df[year_col] - df["peak_year"]
-    
-    # years_before_peak: positive when before peak, 0 otherwise
-    df[output_before_col] = np.where(years_diff < 0, -years_diff, 0)
-    
-    # years_after_peak: positive when after peak, 0 otherwise
-    df[output_after_col] = np.where(years_diff > 0, years_diff, 0)
-
-    # pct_of_peak_year: current season as % of peak (avoid division by zero)
-    df["pct_of_peak_year"] = np.where(
-        (df["peak_value"].notna()) & (df["peak_value"] > 0),
-        (df[value_col] / df["peak_value"]) * 100,
-        0.0
+    df_out = (
+        df
+        .copy()
+        .sort_values([player_col, year_col])
     )
-    
-    return df.drop(columns=["peak_year", "peak_value"])
+
+    # Running best-to-date value for each player
+    df_out["_peak_value_to_date"] = (
+        df_out
+        .groupby(player_col, sort=False)[value_col]
+        .cummax()
+    )
+
+    # Year in which the running max last occurred (ffill within player)
+    df_out["_peak_year_to_date"] = (
+        df_out[year_col]
+        .where(df_out[value_col] == df_out["_peak_value_to_date"])
+    )
+    df_out["_peak_year_to_date"] = (
+        df_out
+        .groupby(player_col, sort=False)["_peak_year_to_date"]
+        .ffill()
+    )
+
+    # years_after_peak: positive when after best-to-date, 0 otherwise
+    # (with best-to-date peak, this is always >= 0)
+    df_out[output_after_col] = (df_out[year_col] - df_out["_peak_year_to_date"]).astype("int64")
+
+    # pct_of_peak_year: current season as % of best-to-date peak (avoid division by zero)
+    df_out["pct_of_peak_year"] = np.where(
+        df_out["_peak_value_to_date"].notna() & (df_out["_peak_value_to_date"] > 0),
+        (df_out[value_col] / df_out["_peak_value_to_date"]) * 100.0,
+        0.0,
+    )
+
+    return df_out.drop(columns=["_peak_year_to_date", "_peak_value_to_date"])
 
 def calculate_fantasy_points_percentile(
     df: pd.DataFrame,
