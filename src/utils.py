@@ -1,6 +1,5 @@
 import pandas as pd
 from datetime import datetime
-from modeling import calculate_delta
 from typing import Literal
 import os
 
@@ -37,7 +36,7 @@ def save_data(
     start_year: int,
     end_year: int,
     data_folder: str = "data",
-    fmt: str = "UD",               
+    fmt: str = "UD",
     file_type: Literal["parquet", "csv"] = "parquet",
     parquet_engine: str = "pyarrow",
     parquet_compression: str = "zstd",
@@ -84,7 +83,7 @@ def load_training_data(
     *,
     year: int | None = None,
     data_folder: str = "data",
-    fmt: str = "UD",  
+    fmt: str = "UD",
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """
     Loads the batting_data and pitching_data Parquet files for a given year
