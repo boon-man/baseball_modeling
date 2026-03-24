@@ -6,6 +6,9 @@ BAT_POS_OVERRIDES = {
     "Shohei Ohtani": "OF",
     "Rafael Devers": "OF",
     "Tyler Soderstrom": "OF",
+    "Jose Altuve": "OF",
+    "Marcell Ozuna": "OF",
+    "Ceddanne Rafaela": "OF",
 }
 
 # Defining scoring formats and their corresponding rules
