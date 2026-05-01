@@ -23,7 +23,7 @@ from plotnine import (
     element_rect,
     element_line,
 )
-from config import MLB_COLOR_PALETTE
+from src.config import MLB_COLOR_PALETTE
 
 def theme_mlb():
     """
@@ -249,7 +249,7 @@ def plot_actual_vs_pred_mlb(
             fontstyle="italic",
         )
 
-        # Region annotations 
+        # Region annotations
         + annotate(
             "text",
             x=under_x,
@@ -530,7 +530,7 @@ def plot_resid_hist_mlb(
 
     return p
 
-    
+
 def plot_decile_calib(
     results: pd.DataFrame,
     color_palette: list[str] = MLB_COLOR_PALETTE,
@@ -599,7 +599,7 @@ def plot_decile_calib(
     )
 
     # For labels, flip sign as in your NBA code so that positive % implies
-    # “model underpredicted” (actual > predicted) if you prefer that convention.
+    # "model underpredicted" (actual > predicted) if you prefer that convention.
     decile_diff = decile_diff.assign(
         diff_label=lambda d: (-d["pct_diff"].round(1)).astype(str) + "%"
     )

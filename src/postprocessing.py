@@ -2,7 +2,7 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 from sklearn.cluster import KMeans
-from helper import get_value_before_comma
+from src.utils import get_value_before_comma
 
 
 def assign_position_group(df: pd.DataFrame, position_col: str):

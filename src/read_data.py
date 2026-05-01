@@ -7,15 +7,17 @@ from typing import Callable, Literal, Sequence
 import requests
 from bs4 import BeautifulSoup
 
-from modeling import (calculate_productivity_score, calculate_fantasy_points_percentile, _add_deltas, add_efficiency_stats, 
-    add_per_year_features, calculate_growths, calculate_years_since_peak, add_player_tier, add_pitcher_role_flags)
-from helper import (
+from src.features import (calculate_productivity_score, calculate_fantasy_points_percentile, _add_deltas, add_efficiency_stats,
+    add_per_year_features, calculate_growths, calculate_years_since_peak, add_player_tier, add_pitcher_role_flags,
+    add_era_bucket, add_history_coverage)
+from src.utils import (
     calc_fantasy_points,
     add_suffix_to_columns,
     save_data,
     split_name,
+    _year_suffix,
 )
-from config import AGG_YEARS, SCORING_RULES
+from src.config import AGG_YEARS, SCORING_RULES
 
 StatsFn = Callable[..., pd.DataFrame]
 
@@ -165,61 +167,6 @@ def _fetch_player_origin_and_position(mlbam_ids: pd.Series) -> pd.DataFrame:
         )
     )
 
-# Function to add era buckets based on season
-def add_era_bucket(df):
-    s = df["Season"]
-    return df.assign(
-        era=np.select(
-            [
-                s < 2005,
-                s < 2010,
-                s < 2015,
-                s < 2020,
-                s < 2030,
-            ],
-            [
-                "early_2000s",
-                "mid_2000s",
-                "early_2010s",
-                "mid_2010s",
-                "2020s",
-            ],
-            default="other",
-        )
-    )
-
-# Function to create a feature that will denote player years available in aggregate season pulls (e.g., player only has 3 years of data but agg_years=5)
-def add_history_coverage(
-    df: pd.DataFrame,
-    *,
-    agg_years: int,
-    years_in_league_col: str = "years_in_league",
-    prefix: str = "years_covered_prior",
-) -> pd.DataFrame:
-    """
-    Adds:
-      - years_covered_prior{agg_years}
-      - years_covered_prior{agg_years*2}
-
-    Coverage = min(years_in_league + 1, window)
-    """
-    w1 = agg_years
-    w2 = agg_years * 2
-
-    out = (
-        df
-        .assign(
-            seasons_available=lambda d: pd.to_numeric(d[years_in_league_col], errors="coerce").fillna(0) + 1,
-            **{
-                f"{prefix}{w1}": lambda d, w=w1: d["seasons_available"].clip(upper=w).astype("Int64"),
-                f"{prefix}{w2}": lambda d, w=w2: d["seasons_available"].clip(upper=w).astype("Int64"),
-            },
-        )
-        .drop(columns=["seasons_available"])
-    )
-
-    return out
-
 def _fetch_draft_year(year: int) -> pd.DataFrame:
     """
     Pull /api/v1/draft/{year} and return one row per pick.
@@ -243,7 +190,7 @@ def _fetch_draft_year(year: int) -> pd.DataFrame:
                     "mlbam_id": person.get("id"),
                     "pick_round": pick.get("pickRound"),
                     "round_pick_number": pick.get("roundPickNumber"),
-                    "overall_pick_number": pick.get("pickNumber"),  # overall pick :contentReference[oaicite:2]{index=2}
+                    "overall_pick_number": pick.get("pickNumber"),
                     "team_id": team.get("id"),
                     "team_name": team.get("name"),
                     "draft_type": (pick.get("draftType") or {}).get("code"),
@@ -433,7 +380,7 @@ def add_overall_pick_features(
             ).astype(int),
         )
     )
-    
+
     return out
 
 def _player_history_lookup(df: pd.DataFrame) -> pd.DataFrame:
@@ -499,10 +446,6 @@ def _career_year_bounds(end_year: int, career_years_back: int) -> tuple[int, int
     # end_year=2023, career_years_back=10 => 2014-2023
     start_y = end_year - career_years_back + 1
     return start_y, end_year
-
-# Helper data pull function for identifying year suffixes for saved filename recognition
-def _year_suffix(start_year: int, end_year: int) -> str:
-    return f"{start_year}" if start_year == end_year else f"{start_year}_{end_year}"
 
 def pull_agg_stats(
     *,
@@ -781,7 +724,7 @@ def pull_data(
         if year < end_year:
             batting_year = batting_year.merge(
                 batting_future, on="IDfg", how="left"
-        )
+            )
 
         # =========================
         # Pitching pulls
@@ -854,7 +797,7 @@ def pull_data(
         if year < end_year:
             pitching_year = pitching_year.merge(
                 pitching_future, on="IDfg", how="left"
-        )
+            )
 
         batting_all.append(batting_year)
         pitching_all.append(pitching_year)
@@ -936,7 +879,7 @@ def prepare_data(
     -------
     batting_train, pitching_train, batting_pred, pitching_pred
     """
-    id_cols = id_cols or ["IDfg"] 
+    id_cols = id_cols or ["IDfg"]
 
     # --- Cast types first (avoid downstream dtype surprises) ---
     batting_df = cast_feature_dtypes(batting_df)
